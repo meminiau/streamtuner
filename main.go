@@ -109,7 +109,7 @@ const uiTemplate = `<!DOCTYPE html>
     <header>
       <div class="logo-group">
         <h1>StreamTuner</h1>
-        <span class="badge">v0.3.0</span>
+        <span class="badge">v0.3.1</span>
       </div>
       <div>
         <a href="/discover.json" target="_blank" style="color: var(--accent); font-size: 0.9rem; text-decoration: none;">View discover.json</a>
@@ -158,7 +158,7 @@ const uiTemplate = `<!DOCTYPE html>
           <tr>
             <th>#</th>
             <th>Channel Name</th>
-            <th>Source Stream</th>
+            <th>Stream Test Link</th>
           </tr>
         </thead>
         <tbody>
@@ -166,7 +166,7 @@ const uiTemplate = `<!DOCTYPE html>
           <tr>
             <td><strong>{{.GuideNumber}}</strong></td>
             <td>{{.GuideName}}</td>
-            <td class="channel-url">{{.URL}}</td>
+            <td class="channel-url"><a href="/stream/{{.GuideNumber}}" target="_blank" style="color: var(--accent); text-decoration: none;">/stream/{{.GuideNumber}}</a></td>
           </tr>
           {{end}}
         </tbody>
@@ -419,7 +419,7 @@ func main() {
 		json.NewEncoder(w).Encode(lineup)
 	})
 
-	// Live Stream Proxy (Remuxes HLS to MPEG-TS with auto-reconnect)
+	// Live Stream Proxy (Low-latency remux with immediate packet flush)
 	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
 		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
 		var targetURL string
@@ -444,16 +444,19 @@ func main() {
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "ffmpeg",
-			"-reconnect", "1",
-			"-reconnect_at_eof", "1",
-			"-reconnect_streamed", "1",
-			"-reconnect_delay_max", "5",
+			"-hide_banner",
+			"-loglevel", "warning",
+			"-probesize", "1000000",
+			"-analyzeduration", "1000000",
 			"-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
 			"-i", targetURL,
 			"-c", "copy",
 			"-f", "mpegts",
+			"-flush_packets", "1",
 			"pipe:1",
 		)
+
+		cmd.Stderr = os.Stderr
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
@@ -471,7 +474,6 @@ func main() {
 		w.Header().Set("Content-Type", "video/mp2t")
 		w.Header().Set("Connection", "keep-alive")
 
-		// Stream bytes directly to client
 		io.Copy(w, stdout)
 		cmd.Process.Kill()
 		cmd.Wait()
