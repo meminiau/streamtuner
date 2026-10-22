@@ -19,10 +19,12 @@ import (
 )
 
 type Config struct {
-	FriendlyName string `json:"friendly_name"`
-	TunerCount   int    `json:"tuner_count"`
-	M3UURL       string `json:"m3u_url"`
-	XMLTVURL     string `json:"xmltv_url"`
+	FriendlyName     string          `json:"friendly_name"`
+	TunerCount       int             `json:"tuner_count"`
+	M3UURLs          string          `json:"m3u_urls"`
+	XMLTVURL         string          `json:"xmltv_url"`
+	FilterKeywords   string          `json:"filter_keywords"`
+	DisabledChannels map[string]bool `json:"disabled_channels"`
 }
 
 type Channel struct {
@@ -30,6 +32,7 @@ type Channel struct {
 	GuideName   string `json:"GuideName"`
 	URL         string `json:"URL"`
 	Logo        string `json:"Logo,omitempty"`
+	Enabled     bool   `json:"Enabled"`
 }
 
 type DeviceInfo struct {
@@ -79,29 +82,35 @@ const uiTemplate = `<!DOCTYPE html>
       --accent-hover: #00b3a6;
       --text: #f0f4f8;
       --text-muted: #8e9eb5;
+      --danger: #ef4444;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background: var(--bg); color: var(--text); padding: 20px; display: flex; justify-content: center; }
-    .container { width: 100%; max-width: 900px; }
-    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
-    .logo-group { display: flex; align-items: center; gap: 12px; }
-    .logo-group h1 { font-size: 1.5rem; color: var(--accent); }
-    .badge { background: var(--border); color: var(--accent); padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
-    .card h2 { font-size: 1.2rem; margin-bottom: 16px; color: var(--text); }
-    .form-group { margin-bottom: 16px; }
-    label { display: block; margin-bottom: 6px; font-size: 0.9rem; color: var(--text-muted); font-weight: 500; }
-    input[type="text"], input[type="number"] { width: 100%; padding: 12px 14px; background: #0c101a; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 1rem; }
-    input[type="text"]:focus, input[type="number"]:focus { outline: none; border-color: var(--accent); }
-    button { background: var(--accent); color: #051015; border: none; padding: 12px 24px; font-size: 1rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
-    button:hover { background: var(--accent-hover); }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
-    .stat-box { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; text-align: center; }
-    .stat-box .val { font-size: 1.8rem; font-weight: 700; color: var(--accent); margin-top: 4px; }
-    .channel-table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    .channel-table th, .channel-table td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+    body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; }
+    .container { width: 100%; max-width: 960px; }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+    .logo-group { display: flex; align-items: center; gap: 10px; }
+    .logo-group h1 { font-size: 1.4rem; color: var(--accent); }
+    .badge { background: var(--border); color: var(--accent); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+    .card h2 { font-size: 1.15rem; margin-bottom: 14px; color: var(--text); }
+    .form-group { margin-bottom: 14px; }
+    label { display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
+    input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px 12px; background: #0c101a; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; }
+    textarea { resize: vertical; min-height: 80px; font-family: monospace; font-size: 0.85rem; }
+    input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    .btn { background: var(--accent); color: #051015; border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+    .btn:hover { background: var(--accent-hover); }
+    .btn-secondary { background: var(--border); color: var(--text); font-weight: 600; padding: 6px 12px; font-size: 0.8rem; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .stat-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-align: center; }
+    .stat-box .label { font-size: 0.8rem; color: var(--text-muted); }
+    .stat-box .val { font-size: 1.6rem; font-weight: 700; color: var(--accent); margin-top: 4px; }
+    .table-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+    .channel-table { width: 100%; border-collapse: collapse; }
+    .channel-table th, .channel-table td { padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
     .channel-table th { color: var(--text-muted); font-weight: 600; }
-    .channel-url { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+    .channel-url { max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
   </style>
 </head>
 <body>
@@ -109,98 +118,121 @@ const uiTemplate = `<!DOCTYPE html>
     <header>
       <div class="logo-group">
         <h1>StreamTuner</h1>
-        <span class="badge">v0.3.1</span>
+        <span class="badge">v0.4.0</span>
       </div>
       <div>
-        <a href="/discover.json" target="_blank" style="color: var(--accent); font-size: 0.9rem; text-decoration: none;">View discover.json</a>
+        <a href="/lineup.json" target="_blank" style="color: var(--accent); font-size: 0.85rem; text-decoration: none;">View Active lineup.json</a>
       </div>
     </header>
 
     <div class="stats">
       <div class="stat-box">
-        <div>Active Tuners</div>
+        <div class="label">Tuners</div>
         <div class="val">{{.Config.TunerCount}}</div>
       </div>
       <div class="stat-box">
-        <div>Channels Loaded</div>
+        <div class="label">Total Found</div>
         <div class="val">{{len .Channels}}</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">Active in Lineup</div>
+        <div class="val">{{.ActiveCount}}</div>
       </div>
     </div>
 
-    <div class="card">
-      <h2>Tuner Configuration</h2>
-      <form action="/save" method="POST">
+    <form action="/save" method="POST">
+      <div class="card">
+        <h2>Configuration &amp; Sources</h2>
         <div class="form-group">
-          <label>Device Friendly Name</label>
+          <label>Friendly Name</label>
           <input type="text" name="friendly_name" value="{{.Config.FriendlyName}}" required>
         </div>
         <div class="form-group">
-          <label>Number of Virtual Tuners</label>
+          <label>Virtual Tuners</label>
           <input type="number" name="tuner_count" value="{{.Config.TunerCount}}" min="1" max="32" required>
         </div>
         <div class="form-group">
-          <label>M3U / M3U8 Playlist URL</label>
-          <input type="text" name="m3u_url" value="{{.Config.M3UURL}}" placeholder="https://example.com/playlist.m3u8">
+          <label>M3U / M3U8 Playlist URLs (Paste multiple URLs on separate lines for international feeds)</label>
+          <textarea name="m3u_urls" placeholder="https://example.com/playlist1.m3u8&#10;https://example.com/international.m3u8">{{.Config.M3UURLs}}</textarea>
         </div>
         <div class="form-group">
           <label>XMLTV EPG URL</label>
           <input type="text" name="xmltv_url" value="{{.Config.XMLTVURL}}" placeholder="https://example.com/epg.xml">
         </div>
-        <button type="submit">Save &amp; Reload Channels</button>
-      </form>
-    </div>
+        <div class="form-group">
+          <label>Channel Name Filter (Optional comma-separated keywords, e.g.: ABC, Seven, Nine, 10, SBS, BBC)</label>
+          <input type="text" name="filter_keywords" value="{{.Config.FilterKeywords}}" placeholder="Leave blank to include all channels">
+        </div>
+        <button type="submit" class="btn">Save &amp; Reload Feeds</button>
+      </div>
 
-    <div class="card">
-      <h2>Channel Lineup ({{len .Channels}})</h2>
-      {{if .Channels}}
-      <table class="channel-table">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Channel Name</th>
-            <th>Stream Test Link</th>
-          </tr>
-        </thead>
-        <tbody>
-          {{range .Channels}}
-          <tr>
-            <td><strong>{{.GuideNumber}}</strong></td>
-            <td>{{.GuideName}}</td>
-            <td class="channel-url"><a href="/stream/{{.GuideNumber}}" target="_blank" style="color: var(--accent); text-decoration: none;">/stream/{{.GuideNumber}}</a></td>
-          </tr>
-          {{end}}
-        </tbody>
-      </table>
-      {{else}}
-        <p style="color: var(--text-muted); font-size: 0.95rem;">No channels loaded. Enter an M3U playlist URL above and click Save.</p>
-      {{end}}
-    </div>
+      <div class="card">
+        <div class="table-actions">
+          <h2>Channel Lineup ({{len .Channels}})</h2>
+          <div>
+            <button type="button" class="btn btn-secondary" onclick="toggleAll(true)">Select All</button>
+            <button type="button" class="btn btn-secondary" onclick="toggleAll(false)">Deselect All</button>
+            <button type="submit" class="btn" style="padding: 6px 14px; font-size: 0.8rem;">Apply Changes</button>
+          </div>
+        </div>
+
+        {{if .Channels}}
+        <table class="channel-table">
+          <thead>
+            <tr>
+              <th style="width: 40px; text-align: center;">Active</th>
+              <th style="width: 60px;">#</th>
+              <th>Channel Name</th>
+              <th>Test Link</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{range .Channels}}
+            <tr>
+              <td style="text-align: center;">
+                <input type="checkbox" name="active_channels" value="{{.GuideNumber}}" {{if .Enabled}}checked{{end}}>
+              </td>
+              <td><strong>{{.GuideNumber}}</strong></td>
+              <td>{{.GuideName}}</td>
+              <td class="channel-url"><a href="/stream/{{.GuideNumber}}" target="_blank" style="color: var(--accent); text-decoration: none;">/stream/{{.GuideNumber}}</a></td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        {{else}}
+          <p style="color: var(--text-muted); font-size: 0.9rem;">No channels loaded. Enter one or more M3U playlist URLs above and click Save.</p>
+        {{end}}
+      </div>
+    </form>
   </div>
+
+  <script>
+    function toggleAll(status) {
+      const boxes = document.querySelectorAll('input[name="active_channels"]');
+      boxes.forEach(cb => cb.checked = status);
+    }
+  </script>
 </body>
 </html>`
 
-func parseM3U(url string) ([]Channel, error) {
-	if url == "" {
-		return nil, nil
-	}
-
+func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, startChNum, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, startChNum, err
 	}
 	defer resp.Body.Close()
 
 	var parsed []Channel
 	scanner := bufio.NewScanner(resp.Body)
 	var currentName, currentLogo string
-	chNum := 1
+	chNum := startChNum
 
 	reTvgName := regexp.MustCompile(`tvg-name="([^"]+)"`)
 	reTvgLogo := regexp.MustCompile(`tvg-logo="([^"]+)"`)
@@ -234,6 +266,7 @@ func parseM3U(url string) ([]Channel, error) {
 				GuideNumber: guideNo,
 				GuideName:   currentName,
 				Logo:        currentLogo,
+				Enabled:     true,
 			})
 			chNum++
 		} else if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
@@ -249,7 +282,61 @@ func parseM3U(url string) ([]Channel, error) {
 			cleaned = append(cleaned, c)
 		}
 	}
-	return cleaned, nil
+	return cleaned, chNum, nil
+}
+
+func matchesFilter(name string, filterKeywords string) bool {
+	if strings.TrimSpace(filterKeywords) == "" {
+		return true
+	}
+	keywords := strings.Split(filterKeywords, ",")
+	lowerName := strings.ToLower(name)
+	for _, kw := range keywords {
+		cleanKw := strings.ToLower(strings.TrimSpace(kw))
+		if cleanKw != "" && strings.Contains(lowerName, cleanKw) {
+			return true
+		}
+	}
+	return false
+}
+
+func loadAllChannels() {
+	if appConfig.M3UURLs == "" {
+		channels = nil
+		return
+	}
+
+	urls := strings.Split(appConfig.M3UURLs, "\n")
+	var combined []Channel
+	nextCh := 1
+
+	for _, u := range urls {
+		trimmed := strings.TrimSpace(u)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		chList, next, err := fetchAndParseM3U(trimmed, nextCh)
+		if err != nil {
+			log.Printf("Error fetching playlist %s: %v", trimmed, err)
+			continue
+		}
+		combined = append(combined, chList...)
+		nextCh = next
+	}
+
+	// Apply keyword filtering and disabled state
+	for i := range combined {
+		nameMatch := matchesFilter(combined[i].GuideName, appConfig.FilterKeywords)
+		if !nameMatch {
+			combined[i].Enabled = false
+		} else if appConfig.DisabledChannels != nil {
+			if disabled := appConfig.DisabledChannels[combined[i].GuideNumber]; disabled {
+				combined[i].Enabled = false
+			}
+		}
+	}
+
+	channels = combined
 }
 
 func loadConfig() {
@@ -261,10 +348,12 @@ func loadConfig() {
 	configPath = filepath.Join(configDir, "settings.json")
 
 	appConfig = Config{
-		FriendlyName: "StreamTuner",
-		TunerCount:   4,
-		M3UURL:       "",
-		XMLTVURL:     "",
+		FriendlyName:     "StreamTuner",
+		TunerCount:       4,
+		M3UURLs:          "",
+		XMLTVURL:         "",
+		FilterKeywords:   "",
+		DisabledChannels: make(map[string]bool),
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -272,13 +361,11 @@ func loadConfig() {
 		json.Unmarshal(data, &appConfig)
 	}
 
-	if appConfig.M3UURL != "" {
-		var err error
-		channels, err = parseM3U(appConfig.M3UURL)
-		if err != nil {
-			log.Printf("Failed to load initial playlist: %v", err)
-		}
+	if appConfig.DisabledChannels == nil {
+		appConfig.DisabledChannels = make(map[string]bool)
 	}
+
+	loadAllChannels()
 }
 
 func saveConfig(cfg Config) error {
@@ -317,18 +404,26 @@ func main() {
 		}
 		tmpl, _ := template.New("ui").Parse(uiTemplate)
 		configLock.RLock()
+		active := 0
+		for _, c := range channels {
+			if c.Enabled {
+				active++
+			}
+		}
 		data := struct {
-			Config   Config
-			Channels []Channel
+			Config      Config
+			Channels    []Channel
+			ActiveCount int
 		}{
-			Config:   appConfig,
-			Channels: channels,
+			Config:      appConfig,
+			Channels:    channels,
+			ActiveCount: active,
 		}
 		configLock.RUnlock()
 		tmpl.Execute(w, data)
 	})
 
-	// Save Settings
+	// Save Settings & Checkbox Toggles
 	http.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -341,24 +436,36 @@ func main() {
 			tCount = 1
 		}
 
-		newCfg := Config{
-			FriendlyName: r.FormValue("friendly_name"),
-			TunerCount:   tCount,
-			M3UURL:       strings.TrimSpace(r.FormValue("m3u_url")),
-			XMLTVURL:     strings.TrimSpace(r.FormValue("xmltv_url")),
-		}
-
-		newChannels, err := parseM3U(newCfg.M3UURL)
-		if err != nil {
-			log.Printf("M3U fetch error: %v", err)
+		activeList := r.Form["active_channels"]
+		activeMap := make(map[string]bool)
+		for _, chNo := range activeList {
+			activeMap[chNo] = true
 		}
 
 		configLock.Lock()
-		appConfig = newCfg
-		channels = newChannels
+		newDisabled := make(map[string]bool)
+		for i := range channels {
+			chNo := channels[i].GuideNumber
+			if activeMap[chNo] {
+				channels[i].Enabled = true
+			} else {
+				channels[i].Enabled = false
+				newDisabled[chNo] = true
+			}
+		}
+
+		appConfig.FriendlyName = r.FormValue("friendly_name")
+		appConfig.TunerCount = tCount
+		appConfig.M3UURLs = strings.TrimSpace(r.FormValue("m3u_urls"))
+		appConfig.XMLTVURL = strings.TrimSpace(r.FormValue("xmltv_url"))
+		appConfig.FilterKeywords = strings.TrimSpace(r.FormValue("filter_keywords"))
+		appConfig.DisabledChannels = newDisabled
+
+		loadAllChannels()
+		cfgCopy := appConfig
 		configLock.Unlock()
 
-		saveConfig(newCfg)
+		saveConfig(cfgCopy)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 
@@ -394,7 +501,7 @@ func main() {
 		json.NewEncoder(w).Encode(status)
 	})
 
-	// HDHomeRun Lineup pointing to internal proxy
+	// HDHomeRun Lineup (Serves ONLY Enabled channels)
 	http.HandleFunc("/lineup.json", func(w http.ResponseWriter, r *http.Request) {
 		configLock.RLock()
 		defer configLock.RUnlock()
@@ -402,24 +509,24 @@ func main() {
 		baseURL := getBaseURL(r)
 		var lineup []LineupItem
 		for _, c := range channels {
-			lineup = append(lineup, LineupItem{
-				GuideNumber: c.GuideNumber,
-				GuideName:   c.GuideName,
-				URL:         fmt.Sprintf("%s/stream/%s", baseURL, c.GuideNumber),
-			})
+			if c.Enabled {
+				lineup = append(lineup, LineupItem{
+					GuideNumber: c.GuideNumber,
+					GuideName:   c.GuideName,
+					URL:         fmt.Sprintf("%s/stream/%s", baseURL, c.GuideNumber),
+				})
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		if len(lineup) == 0 {
-			json.NewEncoder(w).Encode([]LineupItem{
-				{GuideNumber: "1", GuideName: "StreamTuner Test", URL: fmt.Sprintf("%s/stream/1", baseURL)},
-			})
+			json.NewEncoder(w).Encode([]LineupItem{})
 			return
 		}
 		json.NewEncoder(w).Encode(lineup)
 	})
 
-	// Live Stream Proxy (Low-latency remux with immediate packet flush)
+	// Live Stream Proxy
 	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
 		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
 		var targetURL string
