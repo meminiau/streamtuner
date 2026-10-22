@@ -1,18 +1,18 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>streamtuner</Name>
-  <Repository>ghcr.io/meminiau/streamtuner:latest</Repository>
-  <Registry>https://github.com/meminiau/streamtuner/pkgs/container/streamtuner</Registry>
+  <Repository>homerj007/streamtuner:latest</Repository>
+  <Registry>https://hub.docker.com/r/homerj007/streamtuner</Registry>
   <Network>bridge</Network>
   <Privileged>false</Privileged>
   <Support>https://github.com/meminiau/streamtuner/issues</Support>
   <Project>https://github.com/meminiau/streamtuner</Project>
-  <Overview>Lightweight IPTV tuner proxy and HDHomeRun emulator for Unraid, Jellyfin, and Plex.</Overview>
+  <Overview>Lightweight IPTV tuner proxy and HDHomeRun emulator with web configuration dashboard.</Overview>
   <Category>MediaApp:Video MediaServer:Video</Category>
-  <WebUI>http://[IP]:[PORT:7070]/discover.json</WebUI>
+  <WebUI>http://[IP]:[PORT:7070]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/meminiau/streamtuner/main/streamtuner.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/meminiau/streamtuner/main/icon.png</Icon>
-  <Description>Lightweight IPTV tuner proxy and HDHomeRun emulator designed to eliminate buffer drops on live Free-to-Air streams.</Description>
+  <Description>Lightweight IPTV tuner proxy and HDHomeRun emulator with responsive web dashboard.</Description>
   <Networking>
     <Mode>bridge</Mode>
     <Publish>
@@ -23,5 +23,13 @@
       </Port>
     </Publish>
   </Networking>
-  <Config Name="Web Port" Target="8080" Default="7070" Mode="tcp" Description="Web interface &amp; HDHomeRun discovery port" Type="Port" Display="always" Required="true" Mask="false">7070</Config>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/streamtuner</HostDir>
+      <ContainerDir>/config</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Config Name="Web Port" Target="8080" Default="7070" Mode="tcp" Description="Web Dashboard &amp; HDHomeRun port" Type="Port" Display="always" Required="true" Mask="false">7070</Config>
+  <Config Name="AppData Storage" Target="/config" Default="/mnt/user/appdata/streamtuner" Mode="rw" Description="Settings and channel cache storage" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/streamtuner</Config>
 </Container>
