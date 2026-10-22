@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -46,6 +49,12 @@ type LineupStatus struct {
 	ScanPossible   int      `json:"ScanPossible"`
 	Source         string   `json:"Source"`
 	SourceList     []string `json:"SourceList"`
+}
+
+type LineupItem struct {
+	GuideNumber string `json:"GuideNumber"`
+	GuideName   string `json:"GuideName"`
+	URL         string `json:"URL"`
 }
 
 var (
@@ -100,7 +109,7 @@ const uiTemplate = `<!DOCTYPE html>
     <header>
       <div class="logo-group">
         <h1>StreamTuner</h1>
-        <span class="badge">v0.2.0</span>
+        <span class="badge">v0.3.0</span>
       </div>
       <div>
         <a href="/discover.json" target="_blank" style="color: var(--accent); font-size: 0.9rem; text-decoration: none;">View discover.json</a>
@@ -175,7 +184,14 @@ func parseM3U(url string) ([]Channel, error) {
 		return nil, nil
 	}
 
-	resp, err := http.Get(url)
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +243,6 @@ func parseM3U(url string) ([]Channel, error) {
 		}
 	}
 
-	// Filter entries with valid URLs
 	var cleaned []Channel
 	for _, c := range parsed {
 		if c.URL != "" {
@@ -277,6 +292,15 @@ func saveConfig(cfg Config) error {
 	return os.WriteFile(configPath, data, 0644)
 }
 
+func getBaseURL(r *http.Request) string {
+	host := r.Host
+	proto := "http"
+	if r.TLS != nil {
+		proto = "https"
+	}
+	return fmt.Sprintf("%s://%s", proto, host)
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -304,7 +328,7 @@ func main() {
 		tmpl.Execute(w, data)
 	})
 
-	// Save Settings API
+	// Save Settings
 	http.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -343,13 +367,7 @@ func main() {
 		configLock.RLock()
 		defer configLock.RUnlock()
 
-		host := r.Host
-		proto := "http"
-		if r.TLS != nil {
-			proto = "https"
-		}
-		baseURL := fmt.Sprintf("%s://%s", proto, host)
-
+		baseURL := getBaseURL(r)
 		info := DeviceInfo{
 			FriendlyName:    appConfig.FriendlyName,
 			ModelNumber:     "HDTC-2US",
@@ -376,20 +394,87 @@ func main() {
 		json.NewEncoder(w).Encode(status)
 	})
 
-	// HDHomeRun Channel Lineup
+	// HDHomeRun Lineup pointing to internal proxy
 	http.HandleFunc("/lineup.json", func(w http.ResponseWriter, r *http.Request) {
 		configLock.RLock()
 		defer configLock.RUnlock()
 
+		baseURL := getBaseURL(r)
+		var lineup []LineupItem
+		for _, c := range channels {
+			lineup = append(lineup, LineupItem{
+				GuideNumber: c.GuideNumber,
+				GuideName:   c.GuideName,
+				URL:         fmt.Sprintf("%s/stream/%s", baseURL, c.GuideNumber),
+			})
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		if len(channels) == 0 {
-			// Fallback channel if empty
-			json.NewEncoder(w).Encode([]Channel{
-				{GuideNumber: "1", GuideName: "StreamTuner Test", URL: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"},
+		if len(lineup) == 0 {
+			json.NewEncoder(w).Encode([]LineupItem{
+				{GuideNumber: "1", GuideName: "StreamTuner Test", URL: fmt.Sprintf("%s/stream/1", baseURL)},
 			})
 			return
 		}
-		json.NewEncoder(w).Encode(channels)
+		json.NewEncoder(w).Encode(lineup)
+	})
+
+	// Live Stream Proxy (Remuxes HLS to MPEG-TS with auto-reconnect)
+	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
+		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
+		var targetURL string
+
+		configLock.RLock()
+		for _, c := range channels {
+			if c.GuideNumber == chNum {
+				targetURL = c.URL
+				break
+			}
+		}
+		configLock.RUnlock()
+
+		if targetURL == "" {
+			http.Error(w, "Channel not found", http.StatusNotFound)
+			return
+		}
+
+		log.Printf("Streaming channel %s from %s", chNum, targetURL)
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "ffmpeg",
+			"-reconnect", "1",
+			"-reconnect_at_eof", "1",
+			"-reconnect_streamed", "1",
+			"-reconnect_delay_max", "5",
+			"-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+			"-i", targetURL,
+			"-c", "copy",
+			"-f", "mpegts",
+			"pipe:1",
+		)
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("FFmpeg stdout pipe error: %v", err)
+			http.Error(w, "Transcoder pipe error", http.StatusInternalServerError)
+			return
+		}
+
+		if err := cmd.Start(); err != nil {
+			log.Printf("FFmpeg failed to start: %v", err)
+			http.Error(w, "Failed to start stream", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Header().Set("Connection", "keep-alive")
+
+		// Stream bytes directly to client
+		io.Copy(w, stdout)
+		cmd.Process.Kill()
+		cmd.Wait()
 	})
 
 	log.Printf("StreamTuner running on port %s", port)
