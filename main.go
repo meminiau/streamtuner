@@ -654,4 +654,138 @@ func main() {
 		saveConfig(cfgCopy)
 		go refreshEPG()
 
-		http.Redirect(w, r, "
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	})
+
+	// Aggregated EPG Endpoint
+	http.HandleFunc("/epg.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		if _, err := os.Stat(epgPath); os.IsNotExist(err) {
+			fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><tv generator-info-name="StreamTuner"></tv>`)
+			return
+		}
+		http.ServeFile(w, r, epgPath)
+	})
+
+	// HDHomeRun Discovery
+	http.HandleFunc("/discover.json", func(w http.ResponseWriter, r *http.Request) {
+		configLock.RLock()
+		defer configLock.RUnlock()
+
+		baseURL := getBaseURL(r)
+		info := DeviceInfo{
+			FriendlyName:    appConfig.FriendlyName,
+			ModelNumber:     "HDTC-2US",
+			FirmwareName:    "hdhomeruntc_atsc",
+			FirmwareVersion: "20260101",
+			DeviceID:        "104E32B1",
+			DeviceAuth:      "streamtuner123",
+			TunerCount:      appConfig.TunerCount,
+			BaseURL:         baseURL,
+			LineupURL:       fmt.Sprintf("%s/lineup.json", baseURL),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(info)
+	})
+
+	http.HandleFunc("/lineup_status.json", func(w http.ResponseWriter, r *http.Request) {
+		status := LineupStatus{
+			ScanInProgress: 0,
+			ScanPossible:   1,
+			Source:         "Cable",
+			SourceList:     []string{"Cable"},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status)
+	})
+
+	// HDHomeRun Lineup
+	http.HandleFunc("/lineup.json", func(w http.ResponseWriter, r *http.Request) {
+		configLock.RLock()
+		defer configLock.RUnlock()
+
+		baseURL := getBaseURL(r)
+		var lineup []LineupItem
+		for _, c := range channels {
+			if c.Enabled {
+				lineup = append(lineup, LineupItem{
+					GuideNumber: c.GuideNumber,
+					GuideName:   c.GuideName,
+					URL:         fmt.Sprintf("%s/stream/%s", baseURL, c.GuideNumber),
+				})
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if len(lineup) == 0 {
+			json.NewEncoder(w).Encode([]LineupItem{})
+			return
+		}
+		json.NewEncoder(w).Encode(lineup)
+	})
+
+	// Live Stream Proxy
+	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
+		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
+		var targetURL string
+
+		configLock.RLock()
+		for _, c := range channels {
+			if c.GuideNumber == chNum {
+				targetURL = c.URL
+				break
+			}
+		}
+		configLock.RUnlock()
+
+		if targetURL == "" {
+			http.Error(w, "Channel not found", http.StatusNotFound)
+			return
+		}
+
+		log.Printf("Streaming channel %s from %s", chNum, targetURL)
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "ffmpeg",
+			"-hide_banner",
+			"-loglevel", "warning",
+			"-probesize", "1000000",
+			"-analyzeduration", "1000000",
+			"-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+			"-i", targetURL,
+			"-c", "copy",
+			"-f", "mpegts",
+			"-flush_packets", "1",
+			"pipe:1",
+		)
+
+		cmd.Stderr = os.Stderr
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("FFmpeg stdout pipe error: %v", err)
+			http.Error(w, "Transcoder pipe error", http.StatusInternalServerError)
+			return
+		}
+
+		if err := cmd.Start(); err != nil {
+			log.Printf("FFmpeg failed to start: %v", err)
+			http.Error(w, "Failed to start stream", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Header().Set("Connection", "keep-alive")
+
+		io.Copy(w, stdout)
+		cmd.Process.Kill()
+		cmd.Wait()
+	})
+
+	log.Printf("StreamTuner running on port %s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatalf("Server failed: %s\n", err)
+	}
+}
