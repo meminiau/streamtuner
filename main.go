@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"html/template"
 	"io"
@@ -16,13 +18,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Config struct {
 	FriendlyName     string          `json:"friendly_name"`
 	TunerCount       int             `json:"tuner_count"`
 	M3UURLs          string          `json:"m3u_urls"`
-	XMLTVURL         string          `json:"xmltv_url"`
+	XMLTVURLs        string          `json:"xmltv_urls"`
+	XMLTVURL         string          `json:"xmltv_url,omitempty"`
 	FilterKeywords   string          `json:"filter_keywords"`
 	DisabledChannels map[string]bool `json:"disabled_channels"`
 }
@@ -32,6 +36,7 @@ type Channel struct {
 	GuideName   string `json:"GuideName"`
 	URL         string `json:"URL"`
 	Logo        string `json:"Logo,omitempty"`
+	TvgID       string `json:"TvgID,omitempty"`
 	Enabled     bool   `json:"Enabled"`
 }
 
@@ -61,10 +66,13 @@ type LineupItem struct {
 }
 
 var (
-	configLock sync.RWMutex
-	appConfig  Config
-	channels   []Channel
-	configPath string
+	configLock      sync.RWMutex
+	appConfig       Config
+	channels        []Channel
+	configPath      string
+	epgPath         string
+	isRefreshingEPG bool
+	epgLock         sync.Mutex
 )
 
 const uiTemplate = `<!DOCTYPE html>
@@ -82,7 +90,6 @@ const uiTemplate = `<!DOCTYPE html>
       --accent-hover: #00b3a6;
       --text: #f0f4f8;
       --text-muted: #8e9eb5;
-      --danger: #ef4444;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; }
@@ -91,6 +98,8 @@ const uiTemplate = `<!DOCTYPE html>
     .logo-group { display: flex; align-items: center; gap: 10px; }
     .logo-group h1 { font-size: 1.4rem; color: var(--accent); }
     .badge { background: var(--border); color: var(--accent); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+    .header-links { display: flex; gap: 14px; }
+    .header-links a { color: var(--accent); font-size: 0.85rem; text-decoration: none; font-weight: 500; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
     .card h2 { font-size: 1.15rem; margin-bottom: 14px; color: var(--text); }
     .form-group { margin-bottom: 14px; }
@@ -118,20 +127,21 @@ const uiTemplate = `<!DOCTYPE html>
     <header>
       <div class="logo-group">
         <h1>StreamTuner</h1>
-        <span class="badge">v0.4.0</span>
+        <span class="badge">v0.5.0</span>
       </div>
-      <div>
-        <a href="/lineup.json" target="_blank" style="color: var(--accent); font-size: 0.85rem; text-decoration: none;">View Active lineup.json</a>
+      <div class="header-links">
+        <a href="/lineup.json" target="_blank">Lineup JSON</a>
+        <a href="/epg.xml" target="_blank">Aggregated EPG XML</a>
       </div>
     </header>
 
     <div class="stats">
       <div class="stat-box">
-        <div class="label">Tuners</div>
+        <div class="label">Virtual Tuners</div>
         <div class="val">{{.Config.TunerCount}}</div>
       </div>
       <div class="stat-box">
-        <div class="label">Total Found</div>
+        <div class="label">Total Ingested</div>
         <div class="val">{{len .Channels}}</div>
       </div>
       <div class="stat-box">
@@ -152,18 +162,18 @@ const uiTemplate = `<!DOCTYPE html>
           <input type="number" name="tuner_count" value="{{.Config.TunerCount}}" min="1" max="32" required>
         </div>
         <div class="form-group">
-          <label>M3U / M3U8 Playlist URLs (Paste multiple URLs on separate lines for international feeds)</label>
-          <textarea name="m3u_urls" placeholder="https://example.com/playlist1.m3u8&#10;https://example.com/international.m3u8">{{.Config.M3UURLs}}</textarea>
+          <label>M3U / M3U8 Playlist URLs (One URL per line)</label>
+          <textarea name="m3u_urls" placeholder="https://example.com/playlist1.m3u8&#10;https://example.com/playlist2.m3u8">{{.Config.M3UURLs}}</textarea>
         </div>
         <div class="form-group">
-          <label>XMLTV EPG URL</label>
-          <input type="text" name="xmltv_url" value="{{.Config.XMLTVURL}}" placeholder="https://example.com/epg.xml">
+          <label>XMLTV EPG URLs (One URL per line — supports .xml and .xml.gz)</label>
+          <textarea name="xmltv_urls" placeholder="https://example.com/epg1.xml&#10;https://example.com/epg2.xml.gz">{{.Config.XMLTVURLs}}</textarea>
         </div>
         <div class="form-group">
-          <label>Channel Name Filter (Optional comma-separated keywords, e.g.: ABC, Seven, Nine, 10, SBS, BBC)</label>
-          <input type="text" name="filter_keywords" value="{{.Config.FilterKeywords}}" placeholder="Leave blank to include all channels">
+          <label>Channel Name Filter (Optional comma-separated keywords)</label>
+          <input type="text" name="filter_keywords" value="{{.Config.FilterKeywords}}" placeholder="e.g.: ABC, Seven, Nine, 10, SBS, BBC">
         </div>
-        <button type="submit" class="btn">Save &amp; Reload Feeds</button>
+        <button type="submit" class="btn">Save &amp; Refresh Feeds</button>
       </div>
 
       <div class="card">
@@ -183,7 +193,8 @@ const uiTemplate = `<!DOCTYPE html>
               <th style="width: 40px; text-align: center;">Active</th>
               <th style="width: 60px;">#</th>
               <th>Channel Name</th>
-              <th>Test Link</th>
+              <th>EPG ID</th>
+              <th>Stream Link</th>
             </tr>
           </thead>
           <tbody>
@@ -194,13 +205,14 @@ const uiTemplate = `<!DOCTYPE html>
               </td>
               <td><strong>{{.GuideNumber}}</strong></td>
               <td>{{.GuideName}}</td>
+              <td style="color: var(--text-muted); font-size: 0.8rem;">{{if .TvgID}}{{.TvgID}}{{else}}-{{end}}</td>
               <td class="channel-url"><a href="/stream/{{.GuideNumber}}" target="_blank" style="color: var(--accent); text-decoration: none;">/stream/{{.GuideNumber}}</a></td>
             </tr>
             {{end}}
           </tbody>
         </table>
         {{else}}
-          <p style="color: var(--text-muted); font-size: 0.9rem;">No channels loaded. Enter one or more M3U playlist URLs above and click Save.</p>
+          <p style="color: var(--text-muted); font-size: 0.9rem;">No channels loaded. Enter your playlist URLs above and click Save.</p>
         {{end}}
       </div>
     </form>
@@ -231,9 +243,10 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 
 	var parsed []Channel
 	scanner := bufio.NewScanner(resp.Body)
-	var currentName, currentLogo string
+	var currentName, currentLogo, currentTvgID string
 	chNum := startChNum
 
+	reTvgID := regexp.MustCompile(`tvg-id="([^"]+)"`)
 	reTvgName := regexp.MustCompile(`tvg-name="([^"]+)"`)
 	reTvgLogo := regexp.MustCompile(`tvg-logo="([^"]+)"`)
 	reTvgChNo := regexp.MustCompile(`tvg-chno="([^"]+)"`)
@@ -243,7 +256,11 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 		if strings.HasPrefix(line, "#EXTINF:") {
 			currentName = ""
 			currentLogo = ""
+			currentTvgID = ""
 
+			if m := reTvgID.FindStringSubmatch(line); len(m) > 1 {
+				currentTvgID = m[1]
+			}
 			if m := reTvgName.FindStringSubmatch(line); len(m) > 1 {
 				currentName = m[1]
 			}
@@ -266,6 +283,7 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 				GuideNumber: guideNo,
 				GuideName:   currentName,
 				Logo:        currentLogo,
+				TvgID:       currentTvgID,
 				Enabled:     true,
 			})
 			chNum++
@@ -324,7 +342,6 @@ func loadAllChannels() {
 		nextCh = next
 	}
 
-	// Apply keyword filtering and disabled state
 	for i := range combined {
 		nameMatch := matchesFilter(combined[i].GuideName, appConfig.FilterKeywords)
 		if !nameMatch {
@@ -339,6 +356,161 @@ func loadAllChannels() {
 	channels = combined
 }
 
+func refreshEPG() {
+	epgLock.Lock()
+	if isRefreshingEPG {
+		epgLock.Unlock()
+		return
+	}
+	isRefreshingEPG = true
+	epgLock.Unlock()
+
+	defer func() {
+		epgLock.Lock()
+		isRefreshingEPG = false
+		epgLock.Unlock()
+	}()
+
+	configLock.RLock()
+	epgURLs := strings.Split(appConfig.XMLTVURLs, "\n")
+	activeTvgIDs := make(map[string]string)
+	activeNames := make(map[string]string)
+
+	for _, c := range channels {
+		if c.Enabled {
+			if c.TvgID != "" {
+				activeTvgIDs[c.TvgID] = c.TvgID
+			}
+			cleanName := strings.ToLower(strings.TrimSpace(c.GuideName))
+			if cleanName != "" {
+				targetID := c.TvgID
+				if targetID == "" {
+					targetID = c.GuideNumber
+				}
+				activeNames[cleanName] = targetID
+			}
+		}
+	}
+	configLock.RUnlock()
+
+	if len(activeTvgIDs) == 0 && len(activeNames) == 0 {
+		return
+	}
+
+	tmpFile := epgPath + ".tmp"
+	out, err := os.Create(tmpFile)
+	if err != nil {
+		log.Printf("EPG create error: %v", err)
+		return
+	}
+
+	out.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+	out.WriteString("<!DOCTYPE tv SYSTEM \"xmltv.dtd\">\n")
+	out.WriteString("<tv generator-info-name=\"StreamTuner\">\n")
+
+	configLock.RLock()
+	for _, c := range channels {
+		if !c.Enabled {
+			continue
+		}
+		chID := c.TvgID
+		if chID == "" {
+			chID = c.GuideNumber
+		}
+		out.WriteString(fmt.Sprintf("  <channel id=\"%s\">\n", template.HTMLEscapeString(chID)))
+		out.WriteString(fmt.Sprintf("    <display-name>%s</display-name>\n", template.HTMLEscapeString(c.GuideName)))
+		out.WriteString(fmt.Sprintf("    <display-name>%s</display-name>\n", template.HTMLEscapeString(c.GuideNumber)))
+		if c.Logo != "" {
+			out.WriteString(fmt.Sprintf("    <icon src=\"%s\"/>\n", template.HTMLEscapeString(c.Logo)))
+		}
+		out.WriteString("  </channel>\n")
+	}
+	configLock.RUnlock()
+
+	client := &http.Client{Timeout: 3 * time.Minute}
+
+	for _, u := range epgURLs {
+		trimmed := strings.TrimSpace(u)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		log.Printf("Fetching EPG: %s", trimmed)
+		req, err := http.NewRequest("GET", trimmed, nil)
+		if err != nil {
+			log.Printf("EPG request error: %v", err)
+			continue
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("EPG download error for %s: %v", trimmed, err)
+			continue
+		}
+
+		var reader io.Reader = resp.Body
+		if strings.HasSuffix(strings.ToLower(trimmed), ".gz") || resp.Header.Get("Content-Encoding") == "gzip" {
+			gz, err := gzip.NewReader(resp.Body)
+			if err == nil {
+				defer gz.Close()
+				reader = gz
+			}
+		}
+
+		matchedIDs := make(map[string]string)
+		dec := xml.NewDecoder(reader)
+
+		for {
+			token, err := dec.Token()
+			if err != nil {
+				break
+			}
+			switch se := token.(type) {
+			case xml.StartElement:
+				if se.Name.Local == "channel" {
+					var ch struct {
+						ID          string   `xml:"id,attr"`
+						DisplayName []string `xml:"display-name"`
+					}
+					if err := dec.DecodeElement(&ch, &se); err == nil {
+						if targetID, ok := activeTvgIDs[ch.ID]; ok {
+							matchedIDs[ch.ID] = targetID
+						} else {
+							for _, dn := range ch.DisplayName {
+								clean := strings.ToLower(strings.TrimSpace(dn))
+								if targetID, ok := activeNames[clean]; ok {
+									matchedIDs[ch.ID] = targetID
+									break
+								}
+							}
+						}
+					}
+				} else if se.Name.Local == "programme" {
+					var prog struct {
+						Start   string `xml:"start,attr"`
+						Stop    string `xml:"stop,attr"`
+						Channel string `xml:"channel,attr"`
+						Raw     []byte `xml:",innerxml"`
+					}
+					if err := dec.DecodeElement(&prog, &se); err == nil {
+						if targetID, ok := matchedIDs[prog.Channel]; ok {
+							fmt.Fprintf(out, "  <programme start=\"%s\" stop=\"%s\" channel=\"%s\">%s</programme>\n",
+								prog.Start, prog.Stop, template.HTMLEscapeString(targetID), string(prog.Raw))
+						}
+					}
+				}
+			}
+		}
+		resp.Body.Close()
+	}
+
+	out.WriteString("</tv>\n")
+	out.Close()
+	os.Rename(tmpFile, epgPath)
+	log.Printf("EPG aggregation complete: saved to %s", epgPath)
+}
+
 func loadConfig() {
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
@@ -346,12 +518,13 @@ func loadConfig() {
 	}
 	os.MkdirAll(configDir, 0755)
 	configPath = filepath.Join(configDir, "settings.json")
+	epgPath = filepath.Join(configDir, "epg.xml")
 
 	appConfig = Config{
 		FriendlyName:     "StreamTuner",
 		TunerCount:       4,
 		M3UURLs:          "",
-		XMLTVURL:         "",
+		XMLTVURLs:        "",
 		FilterKeywords:   "",
 		DisabledChannels: make(map[string]bool),
 	}
@@ -361,6 +534,9 @@ func loadConfig() {
 		json.Unmarshal(data, &appConfig)
 	}
 
+	if appConfig.XMLTVURLs == "" && appConfig.XMLTVURL != "" {
+		appConfig.XMLTVURLs = appConfig.XMLTVURL
+	}
 	if appConfig.DisabledChannels == nil {
 		appConfig.DisabledChannels = make(map[string]bool)
 	}
@@ -395,6 +571,16 @@ func main() {
 	}
 
 	loadConfig()
+
+	// Periodic 12-hour EPG refresh
+	go func() {
+		time.Sleep(5 * time.Second)
+		refreshEPG()
+		ticker := time.NewTicker(12 * time.Hour)
+		for range ticker.C {
+			refreshEPG()
+		}
+	}()
 
 	// Web Dashboard
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +643,7 @@ func main() {
 		appConfig.FriendlyName = r.FormValue("friendly_name")
 		appConfig.TunerCount = tCount
 		appConfig.M3UURLs = strings.TrimSpace(r.FormValue("m3u_urls"))
-		appConfig.XMLTVURL = strings.TrimSpace(r.FormValue("xmltv_url"))
+		appConfig.XMLTVURLs = strings.TrimSpace(r.FormValue("xmltv_urls"))
 		appConfig.FilterKeywords = strings.TrimSpace(r.FormValue("filter_keywords"))
 		appConfig.DisabledChannels = newDisabled
 
@@ -466,128 +652,6 @@ func main() {
 		configLock.Unlock()
 
 		saveConfig(cfgCopy)
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-	})
+		go refreshEPG()
 
-	// HDHomeRun Discovery
-	http.HandleFunc("/discover.json", func(w http.ResponseWriter, r *http.Request) {
-		configLock.RLock()
-		defer configLock.RUnlock()
-
-		baseURL := getBaseURL(r)
-		info := DeviceInfo{
-			FriendlyName:    appConfig.FriendlyName,
-			ModelNumber:     "HDTC-2US",
-			FirmwareName:    "hdhomeruntc_atsc",
-			FirmwareVersion: "20260101",
-			DeviceID:        "104E32B1",
-			DeviceAuth:      "streamtuner123",
-			TunerCount:      appConfig.TunerCount,
-			BaseURL:         baseURL,
-			LineupURL:       fmt.Sprintf("%s/lineup.json", baseURL),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(info)
-	})
-
-	http.HandleFunc("/lineup_status.json", func(w http.ResponseWriter, r *http.Request) {
-		status := LineupStatus{
-			ScanInProgress: 0,
-			ScanPossible:   1,
-			Source:         "Cable",
-			SourceList:     []string{"Cable"},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(status)
-	})
-
-	// HDHomeRun Lineup (Serves ONLY Enabled channels)
-	http.HandleFunc("/lineup.json", func(w http.ResponseWriter, r *http.Request) {
-		configLock.RLock()
-		defer configLock.RUnlock()
-
-		baseURL := getBaseURL(r)
-		var lineup []LineupItem
-		for _, c := range channels {
-			if c.Enabled {
-				lineup = append(lineup, LineupItem{
-					GuideNumber: c.GuideNumber,
-					GuideName:   c.GuideName,
-					URL:         fmt.Sprintf("%s/stream/%s", baseURL, c.GuideNumber),
-				})
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if len(lineup) == 0 {
-			json.NewEncoder(w).Encode([]LineupItem{})
-			return
-		}
-		json.NewEncoder(w).Encode(lineup)
-	})
-
-	// Live Stream Proxy
-	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
-		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
-		var targetURL string
-
-		configLock.RLock()
-		for _, c := range channels {
-			if c.GuideNumber == chNum {
-				targetURL = c.URL
-				break
-			}
-		}
-		configLock.RUnlock()
-
-		if targetURL == "" {
-			http.Error(w, "Channel not found", http.StatusNotFound)
-			return
-		}
-
-		log.Printf("Streaming channel %s from %s", chNum, targetURL)
-
-		ctx, cancel := context.WithCancel(r.Context())
-		defer cancel()
-
-		cmd := exec.CommandContext(ctx, "ffmpeg",
-			"-hide_banner",
-			"-loglevel", "warning",
-			"-probesize", "1000000",
-			"-analyzeduration", "1000000",
-			"-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-			"-i", targetURL,
-			"-c", "copy",
-			"-f", "mpegts",
-			"-flush_packets", "1",
-			"pipe:1",
-		)
-
-		cmd.Stderr = os.Stderr
-
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			log.Printf("FFmpeg stdout pipe error: %v", err)
-			http.Error(w, "Transcoder pipe error", http.StatusInternalServerError)
-			return
-		}
-
-		if err := cmd.Start(); err != nil {
-			log.Printf("FFmpeg failed to start: %v", err)
-			http.Error(w, "Failed to start stream", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "video/mp2t")
-		w.Header().Set("Connection", "keep-alive")
-
-		io.Copy(w, stdout)
-		cmd.Process.Kill()
-		cmd.Wait()
-	})
-
-	log.Printf("StreamTuner running on port %s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("Server failed: %s\n", err)
-	}
-}
+		http.Redirect(w, r, "
