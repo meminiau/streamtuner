@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,14 +23,15 @@ import (
 )
 
 type Config struct {
-	FriendlyName     string          `json:"friendly_name"`
-	TunerCount       int             `json:"tuner_count"`
-	M3UURLs          string          `json:"m3u_urls"`
-	CustomChannels   string          `json:"custom_channels"`
-	XMLTVURLs        string          `json:"xmltv_urls"`
-	XMLTVURL         string          `json:"xmltv_url,omitempty"`
-	FilterKeywords   string          `json:"filter_keywords"`
-	DisabledChannels map[string]bool `json:"disabled_channels"`
+	FriendlyName     string            `json:"friendly_name"`
+	TunerCount       int               `json:"tuner_count"`
+	M3UURLs          string            `json:"m3u_urls"`
+	CustomChannels   string            `json:"custom_channels"`
+	XMLTVURLs        string            `json:"xmltv_urls"`
+	XMLTVURL         string            `json:"xmltv_url,omitempty"`
+	FilterKeywords   string            `json:"filter_keywords"`
+	DisabledChannels map[string]bool   `json:"disabled_channels"`
+	CustomNumbers    map[string]string `json:"custom_numbers"`
 }
 
 type Channel struct {
@@ -38,6 +40,7 @@ type Channel struct {
 	URL         string `json:"URL"`
 	Logo        string `json:"Logo,omitempty"`
 	TvgID       string `json:"TvgID,omitempty"`
+	Group       string `json:"Group,omitempty"`
 	Enabled     bool   `json:"Enabled"`
 }
 
@@ -95,11 +98,11 @@ const uiTemplate = `<!DOCTYPE html>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; }
     .container { width: 100%; max-width: 960px; }
-    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 10px; }
     .logo-group { display: flex; align-items: center; gap: 10px; }
     .logo-group h1 { font-size: 1.4rem; color: var(--accent); }
     .badge { background: var(--border); color: var(--accent); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
-    .header-links { display: flex; gap: 14px; }
+    .header-links { display: flex; gap: 12px; align-items: center; }
     .header-links a { color: var(--accent); font-size: 0.85rem; text-decoration: none; font-weight: 500; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
     .card h2 { font-size: 1.15rem; margin-bottom: 14px; color: var(--text); }
@@ -108,19 +111,50 @@ const uiTemplate = `<!DOCTYPE html>
     input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px 12px; background: #0c101a; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; }
     textarea { resize: vertical; min-height: 80px; font-family: monospace; font-size: 0.85rem; }
     input:focus, textarea:focus { outline: none; border-color: var(--accent); }
-    .btn { background: var(--accent); color: #051015; border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+    .btn { background: var(--accent); color: #051015; border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; text-decoration: none; display: inline-block; }
     .btn:hover { background: var(--accent-hover); }
-    .btn-secondary { background: var(--border); color: var(--text); font-weight: 600; padding: 6px 12px; font-size: 0.8rem; }
+    .btn-secondary { background: var(--border); color: var(--text); font-weight: 600; padding: 7px 12px; font-size: 0.8rem; border-radius: 6px; text-decoration: none; cursor: pointer; border: 1px solid var(--border); }
+    .btn-secondary:hover { border-color: var(--accent); }
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
     .stat-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-align: center; }
     .stat-box .label { font-size: 0.8rem; color: var(--text-muted); }
     .stat-box .val { font-size: 1.6rem; font-weight: 700; color: var(--accent); margin-top: 4px; }
     .table-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+    
+    /* Scrollable Channel Table Window */
+    .table-container {
+      max-height: 480px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #0c101a;
+    }
     .channel-table { width: 100%; border-collapse: collapse; }
-    .channel-table th, .channel-table td { padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
-    .channel-table th { color: var(--text-muted); font-weight: 600; }
-    .channel-url { max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .channel-table th, .channel-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+    .channel-table th {
+      position: sticky;
+      top: 0;
+      background: #182032;
+      z-index: 2;
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 2px solid var(--border);
+    }
+    .num-input {
+      width: 58px;
+      padding: 5px 6px;
+      background: #182032;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--accent);
+      font-weight: 700;
+      text-align: center;
+      font-size: 0.85rem;
+    }
+    .num-input:focus { border-color: var(--accent); outline: none; }
+    .group-pill { background: var(--border); padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; color: var(--text-muted); }
     input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+    .backup-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 10px; border-top: 1px solid var(--border); margin-top: 16px; }
   </style>
 </head>
 <body>
@@ -128,7 +162,7 @@ const uiTemplate = `<!DOCTYPE html>
     <header>
       <div class="logo-group">
         <h1>StreamTuner</h1>
-        <span class="badge">v0.6.0</span>
+        <span class="badge">v0.7.0</span>
       </div>
       <div class="header-links">
         <a href="/lineup.json" target="_blank">Lineup JSON</a>
@@ -163,64 +197,96 @@ const uiTemplate = `<!DOCTYPE html>
           <input type="number" name="tuner_count" value="{{.Config.TunerCount}}" min="1" max="32" required>
         </div>
         <div class="form-group">
-          <label>M3U / M3U8 Playlist URLs (One URL per line)</label>
-          <textarea name="m3u_urls" placeholder="https://example.com/playlist1.m3u8&#10;https://example.com/playlist2.m3u8">{{.Config.M3UURLs}}</textarea>
+          <label>M3U / M3U8 Playlist URLs (One URL per line — Auto-tagged by country)</label>
+          <textarea name="m3u_urls" placeholder="https://example.com/au.m3u8&#10;https://example.com/us.m3u">{{.Config.M3UURLs}}</textarea>
         </div>
         <div class="form-group">
-          <label>Custom Overrides &amp; Direct Channels (Format: Number, Name, Stream URL, EPG_ID)</label>
-          <textarea name="custom_channels" placeholder="9, Channel 9 HD, https://9now-livestreams-fhd-t.akamaized.net/u/prod/simulcast/syd/ch9/hls/r1/index.m3u8, mjh-channel-9-nsw">{{.Config.CustomChannels}}</textarea>
+          <label>Custom Direct Channels (Format: Number, Name, Stream URL, EPG_ID)</label>
+          <textarea name="custom_channels" placeholder="9, Channel 9 HD, https://9now...m3u8, mjh-channel-9-nsw">{{.Config.CustomChannels}}</textarea>
         </div>
         <div class="form-group">
           <label>XMLTV EPG URLs (One URL per line — supports .xml and .xml.gz)</label>
-          <textarea name="xmltv_urls" placeholder="https://example.com/epg1.xml&#10;https://example.com/epg2.xml.gz">{{.Config.XMLTVURLs}}</textarea>
+          <textarea name="xmltv_urls" placeholder="https://example.com/epg.xml">{{.Config.XMLTVURLs}}</textarea>
         </div>
         <div class="form-group">
           <label>Channel Name Filter (Optional comma-separated keywords)</label>
           <input type="text" name="filter_keywords" value="{{.Config.FilterKeywords}}" placeholder="e.g.: ABC, Seven, Nine, 10, SBS, BBC">
         </div>
-        <button type="submit" class="btn">Save &amp; Refresh Feeds</button>
+        
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <button type="submit" class="btn">Save &amp; Reload Feeds</button>
+        </div>
+
+        <div class="backup-bar">
+          <span style="font-size: 0.85rem; color: var(--text-muted);">Configuration Backup:</span>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <a href="/export-config" class="btn-secondary">Download Backup (.json)</a>
+            <button type="button" class="btn-secondary" onclick="document.getElementById('importFile').click()">Restore Backup</button>
+          </div>
+        </div>
       </div>
 
       <div class="card">
         <div class="table-actions">
           <h2>Channel Lineup ({{len .Channels}})</h2>
-          <div>
-            <button type="button" class="btn btn-secondary" onclick="toggleAll(true)">Select All</button>
-            <button type="button" class="btn btn-secondary" onclick="toggleAll(false)">Deselect All</button>
+          <div style="display: flex; gap: 8px;">
+            <button type="button" class="btn-secondary" onclick="toggleAll(true)">Select All</button>
+            <button type="button" class="btn-secondary" onclick="toggleAll(false)">Deselect All</button>
             <button type="submit" class="btn" style="padding: 6px 14px; font-size: 0.8rem;">Apply Changes</button>
           </div>
         </div>
 
         {{if .Channels}}
-        <table class="channel-table">
-          <thead>
-            <tr>
-              <th style="width: 40px; text-align: center;">Active</th>
-              <th style="width: 60px;">#</th>
-              <th>Channel Name</th>
-              <th>EPG ID</th>
-              <th>Stream Link</th>
-            </tr>
-          </thead>
-          <tbody>
-            {{range .Channels}}
-            <tr>
-              <td style="text-align: center;">
-                <input type="checkbox" name="active_channels" value="{{.GuideNumber}}" {{if .Enabled}}checked{{end}}>
-              </td>
-              <td><strong>{{.GuideNumber}}</strong></td>
-              <td>{{.GuideName}}</td>
-              <td style="color: var(--text-muted); font-size: 0.8rem;">{{if .TvgID}}{{.TvgID}}{{else}}-{{end}}</td>
-              <td class="channel-url"><a href="/stream/{{.GuideNumber}}" target="_blank" style="color: var(--accent); text-decoration: none;">/stream/{{.GuideNumber}}</a></td>
-            </tr>
-            {{end}}
-          </tbody>
-        </table>
+        <div class="table-container">
+          <table class="channel-table">
+            <thead>
+              <tr>
+                <th style="width: 40px; text-align: center;">Active</th>
+                <th style="width: 70px;">#</th>
+                <th>Channel Name</th>
+                <th>Region</th>
+                <th>EPG ID</th>
+                <th>Test</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .Channels}}
+              <tr>
+                <td style="text-align: center;">
+                  <input type="checkbox" name="active_channels" value="{{.URL}}" {{if .Enabled}}checked{{end}}>
+                  <input type="hidden" name="ch_url" value="{{.URL}}">
+                </td>
+                <td>
+                  <input type="text" class="num-input" name="ch_num" value="{{.GuideNumber}}">
+                </td>
+                <td><strong>{{.GuideName}}</strong></td>
+                <td><span class="group-pill">{{.Group}}</span></td>
+                <td style="color: var(--text-muted); font-size: 0.8rem;">{{if .TvgID}}{{.TvgID}}{{else}}-{{end}}</td>
+                <td><a href="/stream/{{.GuideNumber}}" target="_blank" style="color: var(--accent); text-decoration: none;">Play</a></td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
         {{else}}
           <p style="color: var(--text-muted); font-size: 0.9rem;">No channels loaded. Enter your playlist URLs above and click Save.</p>
         {{end}}
       </div>
     </form>
+
+    <!-- Hidden form for config file restore -->
+    <form id="importForm" action="/import-config" method="POST" enctype="multipart/form-data" style="display: none;">
+      <input type="file" id="importFile" name="config_file" accept=".json" onchange="document.getElementById('importForm').submit()">
+    </form>
+
+    <!-- Option 4: Switch to M3U Tuner Mode -->
+    <div class="card" style="border-left: 4px solid var(--accent);">
+      <h2>Option 4: Setup Native Jellyfin Category Tabs (M3U Mode)</h2>
+      <p style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 12px;">
+        Want Jellyfin to display clean category tabs (<strong>Australia</strong>, <strong>United States</strong>, <strong>Canada</strong>, <strong>Japan</strong>) across the top of your Live TV screen instead of one giant mixed list?
+      </p>
+      <a href="/m3u-mode" class="btn btn-secondary">Open M3U Tuner Setup &rarr;</a>
+    </div>
   </div>
 
   <script>
@@ -232,29 +298,124 @@ const uiTemplate = `<!DOCTYPE html>
 </body>
 </html>`
 
-func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
-	client := &http.Client{}
+const m3uModeTemplate = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StreamTuner - M3U Tuner Mode Setup</title>
+  <style>
+    :root {
+      --bg: #0e131f;
+      --card: #182032;
+      --border: #243049;
+      --accent: #00d2c4;
+      --text: #f0f4f8;
+      --text-muted: #8e9eb5;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; }
+    .container { width: 100%; max-width: 800px; }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+    h1 { font-size: 1.4rem; color: var(--accent); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 20px; line-height: 1.5; }
+    .url-box { background: #0c101a; border: 1px solid var(--border); padding: 12px; border-radius: 8px; font-family: monospace; font-size: 0.9rem; color: var(--accent); word-break: break-all; margin: 8px 0 16px 0; }
+    .btn { background: var(--accent); color: #051015; border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; text-decoration: none; display: inline-block; }
+    .step { margin-bottom: 16px; }
+    .step strong { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>M3U Tuner Mode Setup</h1>
+      <a href="/" class="btn" style="padding: 6px 12px; font-size: 0.8rem;">&larr; Back to Dashboard</a>
+    </header>
+
+    <div class="card">
+      <h2 style="font-size: 1.2rem; margin-bottom: 10px;">Why Use M3U Tuner Mode?</h2>
+      <p style="color: var(--text-muted); font-size: 0.9rem;">
+        The HDHomeRun protocol does not support folder or category tags. By connecting Jellyfin to StreamTuner using its dedicated M3U playlist endpoint instead, Jellyfin will automatically group your channels into tabs (<strong>Australia</strong>, <strong>United States</strong>, <strong>Canada</strong>, <strong>Japan</strong>) for every user.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">Your Generated StreamTuner Endpoints</h2>
+
+      <div style="font-size: 0.85rem; color: var(--text-muted);">M3U Playlist URL (With Native Category Tags):</div>
+      <div class="url-box">{{.BaseURL}}/channels.m3u</div>
+
+      <div style="font-size: 0.85rem; color: var(--text-muted);">Aggregated XMLTV EPG URL:</div>
+      <div class="url-box">{{.BaseURL}}/epg.xml</div>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">Setup Instructions for Jellyfin</h2>
+      <div class="step">
+        <strong>1. Remove Existing HDHomeRun Tuner:</strong> In Jellyfin, go to <em>Dashboard &gt; Live TV</em>. Under <em>Tuner Devices</em>, delete the existing StreamTuner HDHomeRun entry.
+      </div>
+      <div class="step">
+        <strong>2. Add as M3U Tuner:</strong> Click <strong>+</strong> next to Tuner Devices and select <strong>M3U Tuner</strong>.
+      </div>
+      <div class="step">
+        <strong>3. Paste Playlist Link:</strong> In the <em>File or URL</em> box, paste:
+        <div style="font-family: monospace; color: var(--accent); margin-top: 4px;">{{.BaseURL}}/channels.m3u</div>
+      </div>
+      <div class="step">
+        <strong>4. Set Simultaneous Stream Limit:</strong> Set the limit to <strong>4</strong> (or your preferred tuner count).
+      </div>
+      <div class="step">
+        <strong>5. Connect Guide:</strong> Under <em>TV Guide Data Providers</em>, add an XMLTV provider with:
+        <div style="font-family: monospace; color: var(--accent); margin-top: 4px;">{{.BaseURL}}/epg.xml</div>
+      </div>
+      <div class="step">
+        <strong>6. Done!</strong> When users open Live TV in Jellyfin, they can filter by category tabs across the top screen.
+      </div>
+    </div>
+  </div>
+</body>
+</html>`
+
+func getPlaylistMeta(url string, index int) (tag string, group string, baseOffset int) {
+	u := strings.ToLower(url)
+	if strings.Contains(u, "/au/") || strings.Contains(u, "australia") || strings.Contains(u, "raw-tv") {
+		return "[AU]", "Australia", 1
+	} else if strings.Contains(u, "/us.m3u") || strings.Contains(u, "/us/") || strings.Contains(u, "countries/us") {
+		return "[US]", "United States", 1000
+	} else if strings.Contains(u, "/ca.m3u") || strings.Contains(u, "/ca/") || strings.Contains(u, "countries/ca") {
+		return "[CA]", "Canada", 2000
+	} else if strings.Contains(u, "/jp.m3u") || strings.Contains(u, "/jp/") || strings.Contains(u, "countries/jp") {
+		return "[JP]", "Japan", 3000
+	} else if strings.Contains(u, "/uk.m3u") || strings.Contains(u, "/uk/") || strings.Contains(u, "countries/uk") {
+		return "[UK]", "United Kingdom", 4000
+	}
+	return fmt.Sprintf("[P%d]", index+1), fmt.Sprintf("Playlist %d", index+1), (index+5)*1000
+}
+
+func fetchAndParseM3U(url string, tag string, group string, baseOffset int) ([]Channel, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, startChNum, err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, startChNum, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var parsed []Channel
 	scanner := bufio.NewScanner(resp.Body)
-	var currentName, currentLogo, currentTvgID string
-	chNum := startChNum
+	var currentName, currentLogo, currentTvgID, currentGroup string
+	chCounter := 1
 
 	reTvgID := regexp.MustCompile(`tvg-id="([^"]+)"`)
 	reTvgName := regexp.MustCompile(`tvg-name="([^"]+)"`)
 	reTvgLogo := regexp.MustCompile(`tvg-logo="([^"]+)"`)
 	reTvgChNo := regexp.MustCompile(`tvg-chno="([^"]+)"`)
+	reGroup := regexp.MustCompile(`group-title="([^"]+)"`)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -262,6 +423,7 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 			currentName = ""
 			currentLogo = ""
 			currentTvgID = ""
+			currentGroup = group
 
 			if m := reTvgID.FindStringSubmatch(line); len(m) > 1 {
 				currentTvgID = m[1]
@@ -272,6 +434,9 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 			if m := reTvgLogo.FindStringSubmatch(line); len(m) > 1 {
 				currentLogo = m[1]
 			}
+			if m := reGroup.FindStringSubmatch(line); len(m) > 1 && group == "" {
+				currentGroup = m[1]
+			}
 			if currentName == "" {
 				parts := strings.Split(line, ",")
 				if len(parts) > 1 {
@@ -279,9 +444,22 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 				}
 			}
 
-			guideNo := fmt.Sprintf("%d", chNum)
+			// Prepend country tag if not present
+			if !strings.HasPrefix(currentName, "[") {
+				currentName = fmt.Sprintf("%s %s", tag, currentName)
+			}
+
+			// Assign channel number according to block offset
+			guideNo := fmt.Sprintf("%d", baseOffset+chCounter-1)
 			if m := reTvgChNo.FindStringSubmatch(line); len(m) > 1 {
-				guideNo = m[1]
+				parsedNo, err := strconv.Atoi(m[1])
+				if err == nil {
+					if baseOffset == 1 {
+						guideNo = fmt.Sprintf("%d", parsedNo)
+					} else {
+						guideNo = fmt.Sprintf("%d", baseOffset+parsedNo)
+					}
+				}
 			}
 
 			parsed = append(parsed, Channel{
@@ -289,9 +467,10 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 				GuideName:   currentName,
 				Logo:        currentLogo,
 				TvgID:       currentTvgID,
+				Group:       currentGroup,
 				Enabled:     true,
 			})
-			chNum++
+			chCounter++
 		} else if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
 			if len(parsed) > 0 && parsed[len(parsed)-1].URL == "" {
 				parsed[len(parsed)-1].URL = line
@@ -305,7 +484,7 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 			cleaned = append(cleaned, c)
 		}
 	}
-	return cleaned, chNum, nil
+	return cleaned, nil
 }
 
 func parseCustomChannels(text string) []Channel {
@@ -325,11 +504,15 @@ func parseCustomChannels(text string) []Channel {
 			if len(parts) >= 4 {
 				tvgID = strings.TrimSpace(parts[3])
 			}
+			if !strings.HasPrefix(name, "[") {
+				name = "[AU] " + name
+			}
 			list = append(list, Channel{
 				GuideNumber: guideNo,
 				GuideName:   name,
 				URL:         streamURL,
 				TvgID:       tvgID,
+				Group:       "Australia",
 				Enabled:     true,
 			})
 		}
@@ -354,31 +537,30 @@ func matchesFilter(name string, filterKeywords string) bool {
 
 func loadAllChannels() {
 	var combined []Channel
-	nextCh := 1
 
 	if appConfig.M3UURLs != "" {
 		urls := strings.Split(appConfig.M3UURLs, "\n")
-		for _, u := range urls {
+		for i, u := range urls {
 			trimmed := strings.TrimSpace(u)
 			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 				continue
 			}
-			chList, next, err := fetchAndParseM3U(trimmed, nextCh)
+			tag, group, baseOffset := getPlaylistMeta(trimmed, i)
+			chList, err := fetchAndParseM3U(trimmed, tag, group, baseOffset)
 			if err != nil {
 				log.Printf("Error fetching playlist %s: %v", trimmed, err)
 				continue
 			}
 			combined = append(combined, chList...)
-			nextCh = next
 		}
 	}
 
-	// Insert or override custom channels
+	// Add custom channels
 	customs := parseCustomChannels(appConfig.CustomChannels)
 	for _, cust := range customs {
 		replaced := false
 		for i := range combined {
-			if combined[i].GuideNumber == cust.GuideNumber {
+			if combined[i].GuideNumber == cust.GuideNumber || combined[i].URL == cust.URL {
 				combined[i] = cust
 				replaced = true
 				break
@@ -389,16 +571,33 @@ func loadAllChannels() {
 		}
 	}
 
+	// Apply custom number overrides & enabled filter
 	for i := range combined {
+		if appConfig.CustomNumbers != nil {
+			if overrideNo, exists := appConfig.CustomNumbers[combined[i].URL]; exists && overrideNo != "" {
+				combined[i].GuideNumber = overrideNo
+			}
+		}
+
 		nameMatch := matchesFilter(combined[i].GuideName, appConfig.FilterKeywords)
 		if !nameMatch {
 			combined[i].Enabled = false
 		} else if appConfig.DisabledChannels != nil {
-			if disabled := appConfig.DisabledChannels[combined[i].GuideNumber]; disabled {
+			if disabled := appConfig.DisabledChannels[combined[i].URL]; disabled {
 				combined[i].Enabled = false
 			}
 		}
 	}
+
+	// Sort channels numerically by GuideNumber
+	sort.Slice(combined, func(i, j int) bool {
+		numI, errI := strconv.Atoi(combined[i].GuideNumber)
+		numJ, errJ := strconv.Atoi(combined[j].GuideNumber)
+		if errI == nil && errJ == nil {
+			return numI < numJ
+		}
+		return combined[i].GuideNumber < combined[j].GuideNumber
+	})
 
 	channels = combined
 }
@@ -575,6 +774,7 @@ func loadConfig() {
 		XMLTVURLs:        "",
 		FilterKeywords:   "",
 		DisabledChannels: make(map[string]bool),
+		CustomNumbers:    make(map[string]string),
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -587,6 +787,9 @@ func loadConfig() {
 	}
 	if appConfig.DisabledChannels == nil {
 		appConfig.DisabledChannels = make(map[string]bool)
+	}
+	if appConfig.CustomNumbers == nil {
+		appConfig.CustomNumbers = make(map[string]string)
 	}
 
 	loadAllChannels()
@@ -656,7 +859,62 @@ func main() {
 		tmpl.Execute(w, data)
 	})
 
-	// Save
+	// M3U Mode Setup Screen
+	http.HandleFunc("/m3u-mode", func(w http.ResponseWriter, r *http.Request) {
+		tmpl, _ := template.New("m3u").Parse(m3uModeTemplate)
+		baseURL := getBaseURL(r)
+		data := struct {
+			BaseURL string
+		}{
+			BaseURL: baseURL,
+		}
+		tmpl.Execute(w, data)
+	})
+
+	// Export Config
+	http.HandleFunc("/export-config", func(w http.ResponseWriter, r *http.Request) {
+		configLock.RLock()
+		data, err := json.MarshalIndent(appConfig, "", "  ")
+		configLock.RUnlock()
+		if err != nil {
+			http.Error(w, "Failed to export config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"streamtuner_backup.json\"")
+		w.Write(data)
+	})
+
+	// Import Config
+	http.HandleFunc("/import-config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		file, _, err := r.FormFile("config_file")
+		if err != nil {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		defer file.Close()
+
+		data, err := io.ReadAll(file)
+		if err == nil {
+			var newCfg Config
+			if err := json.Unmarshal(data, &newCfg); err == nil {
+				configLock.Lock()
+				appConfig = newCfg
+				loadAllChannels()
+				cfgCopy := appConfig
+				configLock.Unlock()
+				saveConfig(cfgCopy)
+				go refreshEPG()
+			}
+		}
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	})
+
+	// Save Settings & Checkbox Toggles & Channel Number Edits
 	http.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -671,19 +929,38 @@ func main() {
 
 		activeList := r.Form["active_channels"]
 		activeMap := make(map[string]bool)
-		for _, chNo := range activeList {
-			activeMap[chNo] = true
+		for _, u := range activeList {
+			activeMap[u] = true
+		}
+
+		// Read editable channel numbers
+		chURLs := r.Form["ch_url"]
+		chNums := r.Form["ch_num"]
+		newCustomNumbers := make(map[string]string)
+		if appConfig.CustomNumbers != nil {
+			for k, v := range appConfig.CustomNumbers {
+				newCustomNumbers[k] = v
+			}
+		}
+		if len(chURLs) == len(chNums) {
+			for i := range chURLs {
+				targetURL := chURLs[i]
+				numVal := strings.TrimSpace(chNums[i])
+				if numVal != "" {
+					newCustomNumbers[targetURL] = numVal
+				}
+			}
 		}
 
 		configLock.Lock()
 		newDisabled := make(map[string]bool)
 		for i := range channels {
-			chNo := channels[i].GuideNumber
-			if activeMap[chNo] {
+			u := channels[i].URL
+			if activeMap[u] {
 				channels[i].Enabled = true
 			} else {
 				channels[i].Enabled = false
-				newDisabled[chNo] = true
+				newDisabled[u] = true
 			}
 		}
 
@@ -694,6 +971,7 @@ func main() {
 		appConfig.XMLTVURLs = strings.TrimSpace(r.FormValue("xmltv_urls"))
 		appConfig.FilterKeywords = strings.TrimSpace(r.FormValue("filter_keywords"))
 		appConfig.DisabledChannels = newDisabled
+		appConfig.CustomNumbers = newCustomNumbers
 
 		loadAllChannels()
 		cfgCopy := appConfig
@@ -703,6 +981,29 @@ func main() {
 		go refreshEPG()
 
 		http.Redirect(w, r, "/", http.StatusSeeOther)
+	})
+
+	// M3U Playlist Endpoint with native group-title tags
+	http.HandleFunc("/channels.m3u", func(w http.ResponseWriter, r *http.Request) {
+		configLock.RLock()
+		defer configLock.RUnlock()
+
+		baseURL := getBaseURL(r)
+		w.Header().Set("Content-Type", "application/x-mpegURL; charset=utf-8")
+		w.Header().Set("Content-Disposition", "inline; filename=\"channels.m3u\"")
+
+		fmt.Fprintln(w, "#EXTM3U")
+		for _, c := range channels {
+			if c.Enabled {
+				chID := c.TvgID
+				if chID == "" {
+					chID = c.GuideNumber
+				}
+				fmt.Fprintf(w, "#EXTINF:-1 tvg-id=\"%s\" tvg-name=\"%s\" tvg-chno=\"%s\" tvg-logo=\"%s\" group-title=\"%s\",%s\n",
+					chID, c.GuideName, c.GuideNumber, c.Logo, c.Group, c.GuideName)
+				fmt.Fprintf(w, "%s/stream/%s\n", baseURL, c.GuideNumber)
+			}
+		}
 	})
 
 	// Aggregated EPG Endpoint
@@ -772,7 +1073,7 @@ func main() {
 		json.NewEncoder(w).Encode(lineup)
 	})
 
-	// Proxy
+	// Stream Proxy
 	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
 		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
 		var targetURL string
