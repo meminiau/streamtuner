@@ -32,11 +32,13 @@ type Config struct {
 	XMLTVURLs        string            `json:"xmltv_urls"`
 	XMLTVURL         string            `json:"xmltv_url,omitempty"`
 	FilterKeywords   string            `json:"filter_keywords"`
+	EnabledChannels  map[string]bool   `json:"enabled_channels"`
 	DisabledChannels map[string]bool   `json:"disabled_channels"`
 	CustomNumbers    map[string]string `json:"custom_numbers"`
 }
 
 type Channel struct {
+	Key         string `json:"Key"`
 	GuideNumber string `json:"GuideNumber"`
 	GuideName   string `json:"GuideName"`
 	URL         string `json:"URL"`
@@ -44,6 +46,13 @@ type Channel struct {
 	TvgID       string `json:"TvgID,omitempty"`
 	Group       string `json:"Group,omitempty"`
 	Enabled     bool   `json:"Enabled"`
+}
+
+type ChannelStateUpdate struct {
+	Key     string `json:"key"`
+	URL     string `json:"url"`
+	Num     string `json:"num"`
+	Enabled bool   `json:"enabled"`
 }
 
 type DeviceInfo struct {
@@ -81,6 +90,10 @@ var (
 	epgLock         sync.Mutex
 )
 
+func makeChannelKey(name, streamURL string) string {
+	return strings.TrimSpace(name) + "|" + strings.TrimSpace(streamURL)
+}
+
 const uiTemplate = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -104,6 +117,8 @@ const uiTemplate = `<!DOCTYPE html>
       --btn-text: #051015;
       --text: #f0f4f8;
       --text-muted: #8e9eb5;
+      --success-bg: rgba(16, 185, 129, 0.15);
+      --success-border: #10b981;
     }
     html[data-theme="light"] {
       --bg: #f1f5f9;
@@ -115,6 +130,8 @@ const uiTemplate = `<!DOCTYPE html>
       --btn-text: #ffffff;
       --text: #0f172a;
       --text-muted: #475569;
+      --success-bg: rgba(13, 148, 136, 0.12);
+      --success-border: #0d9488;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; transition: background 0.2s, color 0.2s; }
@@ -125,13 +142,14 @@ const uiTemplate = `<!DOCTYPE html>
     .logo-group h1 { font-size: 1.5rem; color: var(--accent); }
     .badge { background: var(--border); color: var(--accent); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
     .app-desc { color: var(--text-muted); font-size: 0.9rem; line-height: 1.5; }
+    .toast { background: var(--success-bg); border: 1px solid var(--success-border); color: var(--text); padding: 12px 16px; border-radius: 10px; margin-bottom: 18px; font-size: 0.9rem; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
     .card h2 { font-size: 1.15rem; margin-bottom: 14px; color: var(--text); }
     .form-group { margin-bottom: 14px; }
     label { display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
-    input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px 12px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; }
+    input[type="text"], input[type="number"], select, textarea { width: 100%; padding: 10px 12px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; }
     textarea { resize: vertical; min-height: 80px; font-family: monospace; font-size: 0.85rem; }
-    input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
     .btn { background: var(--accent); color: var(--btn-text); border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; text-decoration: none; display: inline-block; }
     .btn:hover { background: var(--accent-hover); }
     .btn-secondary { background: var(--border); color: var(--text); font-weight: 600; padding: 7px 12px; font-size: 0.8rem; border-radius: 6px; text-decoration: none; cursor: pointer; border: 1px solid var(--border); }
@@ -141,11 +159,16 @@ const uiTemplate = `<!DOCTYPE html>
     .stat-box .label { font-size: 0.8rem; color: var(--text-muted); font-weight: 500; }
     .stat-box .val { font-size: 1.6rem; font-weight: 700; color: var(--accent); margin-top: 4px; }
     .table-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+    .search-bar { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; margin-bottom: 12px; }
+    @media (max-width: 640px) {
+      .search-bar { grid-template-columns: 1fr; }
+    }
+    .search-meta { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
     .table-container { max-height: 480px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--input-bg); }
     .channel-table { width: 100%; border-collapse: collapse; }
     .channel-table th, .channel-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
     .channel-table th { position: sticky; top: 0; background: var(--card); z-index: 2; color: var(--text-muted); font-weight: 600; border-bottom: 2px solid var(--border); }
-    .num-input { width: 58px; padding: 5px 6px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; color: var(--accent); font-weight: 700; text-align: center; font-size: 0.85rem; }
+    .num-input { width: 62px; padding: 5px 6px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; color: var(--accent); font-weight: 700; text-align: center; font-size: 0.85rem; }
     .num-input:focus { border-color: var(--accent); outline: none; }
     .group-pill { background: var(--border); padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; color: var(--text-muted); }
     input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
@@ -170,6 +193,13 @@ const uiTemplate = `<!DOCTYPE html>
       </p>
     </header>
 
+    {{if .Saved}}
+    <div class="toast" id="saveToast">
+      <span>✓ Changes saved! {{.ActiveCount}} stations are currently active and sent to your Media Server.</span>
+      <button type="button" class="btn-secondary" style="padding: 3px 8px;" onclick="document.getElementById('saveToast').style.display='none'">Dismiss</button>
+    </div>
+    {{end}}
+
     <div class="stats">
       <div class="stat-box">
         <div class="label">Virtual Tuners</div>
@@ -181,11 +211,14 @@ const uiTemplate = `<!DOCTYPE html>
       </div>
       <div class="stat-box">
         <div class="label">Stations Sent to Media Server</div>
-        <div class="val">{{.ActiveCount}}</div>
+        <div class="val" id="liveActiveStat">{{.ActiveCount}}</div>
       </div>
     </div>
 
-    <form action="/save" method="POST">
+    <form id="mainForm" action="/save" method="POST" onsubmit="prepareSubmission()">
+      <input type="hidden" name="action_type" id="actionType" value="apply_channels">
+      <input type="hidden" name="channel_state_json" id="channelStateJSON" value="">
+
       <div class="card">
         <h2>Configuration &amp; Sources</h2>
         <div class="form-group">
@@ -205,12 +238,12 @@ const uiTemplate = `<!DOCTYPE html>
           <textarea name="xmltv_urls" placeholder="https://example.com/epg.xml">{{.Config.XMLTVURLs}}</textarea>
         </div>
         <div class="form-group">
-          <label>Channel Name Filter (Optional comma-separated keywords)</label>
-          <input type="text" name="filter_keywords" value="{{.Config.FilterKeywords}}" placeholder="e.g.: ABC, Seven, Nine, 10, SBS, BBC">
+          <label>Initial Playlist Keyword Filter (Optional — leave blank to control all stations with checkboxes below)</label>
+          <input type="text" name="filter_keywords" value="{{.Config.FilterKeywords}}" placeholder="Leave blank to manage stations using the Search &amp; Checkboxes below">
         </div>
         
         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-          <button type="submit" class="btn">Save &amp; Reload Feeds</button>
+          <button type="submit" class="btn" onclick="document.getElementById('actionType').value='reload_feeds'">Save &amp; Reload Feeds</button>
         </div>
 
         <div class="backup-bar">
@@ -225,35 +258,56 @@ const uiTemplate = `<!DOCTYPE html>
       <div class="card">
         <div class="table-actions">
           <h2>Live TV Channels ({{len .Channels}})</h2>
-          <div style="display: flex; gap: 8px;">
-            <button type="button" class="btn-secondary" onclick="toggleAll(true)">Select All</button>
-            <button type="button" class="btn-secondary" onclick="toggleAll(false)">Deselect All</button>
-            <button type="submit" class="btn" style="padding: 6px 14px; font-size: 0.8rem;">Apply Changes</button>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="button" class="btn-secondary" onclick="toggleVisible(true)">Select Visible</button>
+            <button type="button" class="btn-secondary" onclick="toggleVisible(false)">Deselect Visible</button>
+            <button type="submit" class="btn" style="padding: 7px 14px; font-size: 0.85rem;" onclick="document.getElementById('actionType').value='apply_channels'">Apply Changes (<span id="btnActiveCount">{{.ActiveCount}}</span>)</button>
           </div>
         </div>
 
         {{if .Channels}}
+        <div class="search-bar">
+          <input type="text" id="channelSearch" placeholder="🔍 Search channels by name, number, region, or EPG ID..." oninput="filterTable()" onkeydown="if(event.key==='Enter'){event.preventDefault();}">
+          <select id="regionFilter" onchange="filterTable()">
+            <option value="ALL">All Regions</option>
+            <option value="Australia">Australia</option>
+            <option value="United States">United States</option>
+            <option value="Canada">Canada</option>
+            <option value="Japan">Japan</option>
+            <option value="United Kingdom">United Kingdom</option>
+          </select>
+          <select id="statusFilter" onchange="filterTable()">
+            <option value="ALL">All Stations</option>
+            <option value="ACTIVE">Selected Only (Active)</option>
+            <option value="INACTIVE">Unselected Only</option>
+          </select>
+        </div>
+
+        <div class="search-meta">
+          <span id="visibleCountText">Showing all {{len .Channels}} stations</span>
+          <button type="button" class="btn-secondary" style="padding: 3px 8px; font-size: 0.75rem;" onclick="clearSearchFilters()">Reset Search Filters</button>
+        </div>
+
         <div class="table-container">
           <table class="channel-table">
             <thead>
               <tr>
                 <th style="width: 40px; text-align: center;">Active</th>
-                <th style="width: 70px;">#</th>
+                <th style="width: 72px;">#</th>
                 <th>Channel Name</th>
                 <th>Region</th>
                 <th>EPG ID</th>
                 <th>Test</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody id="channelTableBody">
               {{range .Channels}}
-              <tr>
+              <tr class="ch-row" data-key="{{.Key}}" data-url="{{.URL}}" data-name="{{.GuideName}}" data-group="{{.Group}}" data-epg="{{.TvgID}}">
                 <td style="text-align: center;">
-                  <input type="checkbox" name="active_channels" value="{{.URL}}" {{if .Enabled}}checked{{end}}>
-                  <input type="hidden" name="ch_url" value="{{.URL}}">
+                  <input type="checkbox" class="ch-cb" value="{{.Key}}" {{if .Enabled}}checked{{end}} onchange="updateLiveCount()">
                 </td>
                 <td>
-                  <input type="text" class="num-input" name="ch_num" value="{{.GuideNumber}}">
+                  <input type="text" class="num-input ch-num-input" value="{{.GuideNumber}}" onkeydown="if(event.key==='Enter'){event.preventDefault();}">
                 </td>
                 <td><strong>{{.GuideName}}</strong></td>
                 <td><span class="group-pill">{{.Group}}</span></td>
@@ -265,7 +319,7 @@ const uiTemplate = `<!DOCTYPE html>
           </table>
         </div>
         {{else}}
-          <p style="color: var(--text-muted); font-size: 0.9rem;">No channels loaded. Enter your playlist URLs above and click Save.</p>
+          <p style="color: var(--text-muted); font-size: 0.9rem;">No channels loaded. Enter your playlist URLs above and click Save &amp; Reload Feeds.</p>
         {{end}}
       </div>
     </form>
@@ -290,11 +344,101 @@ const uiTemplate = `<!DOCTYPE html>
     </div>
   </div>
 
-  <script>
-    function toggleAll(status) {
-      const boxes = document.querySelectorAll('input[name="active_channels"]');
-      boxes.forEach(cb => cb.checked = status);
+    <script>
+    function updateLiveCount() {
+      const allCbs = document.querySelectorAll('.ch-cb');
+      let active = 0;
+      allCbs.forEach(cb => {
+        if (cb.checked) active++;
+      });
+      const statEl = document.getElementById('liveActiveStat');
+      const btnEl = document.getElementById('btnActiveCount');
+      if (statEl) statEl.textContent = active;
+      if (btnEl) btnEl.textContent = active;
     }
+
+    function toggleVisible(status) {
+      const rows = document.querySelectorAll('.ch-row');
+      rows.forEach(row => {
+        if (row.style.display !== 'none') {
+          const cb = row.querySelector('.ch-cb');
+          if (cb) cb.checked = status;
+        }
+      });
+      updateLiveCount();
+    }
+
+    function filterTable() {
+      const searchInput = document.getElementById('channelSearch');
+      const regionSelect = document.getElementById('regionFilter');
+      const statusSelect = document.getElementById('statusFilter');
+      if (!searchInput) return;
+
+      const query = searchInput.value.toLowerCase().trim();
+      const region = regionSelect ? regionSelect.value : 'ALL';
+      const status = statusSelect ? statusSelect.value : 'ALL';
+
+      const rows = document.querySelectorAll('.ch-row');
+      let visible = 0;
+
+      rows.forEach(row => {
+        const name = (row.getAttribute('data-name') || '').toLowerCase();
+        const group = row.getAttribute('data-group') || '';
+        const epg = (row.getAttribute('data-epg') || '').toLowerCase();
+        const numInput = row.querySelector('.ch-num-input');
+        const num = numInput ? numInput.value.toLowerCase() : '';
+        const cb = row.querySelector('.ch-cb');
+        const isChecked = cb ? cb.checked : false;
+
+        const matchesQuery = !query || name.includes(query) || num.includes(query) || group.toLowerCase().includes(query) || epg.includes(query);
+        const matchesRegion = (region === 'ALL') || (group === region);
+        const matchesStatus = (status === 'ALL') || (status === 'ACTIVE' && isChecked) || (status === 'INACTIVE' && !isChecked);
+
+        if (matchesQuery && matchesRegion && matchesStatus) {
+          row.style.display = '';
+          visible++;
+        } else {
+          row.style.display = 'none';
+        }
+      });
+
+      const countText = document.getElementById('visibleCountText');
+      if (countText) {
+        countText.textContent = 'Showing ' + visible + ' of ' + rows.length + ' stations';
+      }
+    }
+
+    function clearSearchFilters() {
+      const searchInput = document.getElementById('channelSearch');
+      const regionSelect = document.getElementById('regionFilter');
+      const statusSelect = document.getElementById('statusFilter');
+      if (searchInput) searchInput.value = '';
+      if (regionSelect) regionSelect.value = 'ALL';
+      if (statusSelect) statusSelect.value = 'ALL';
+      filterTable();
+    }
+
+    function prepareSubmission() {
+      const rows = document.querySelectorAll('.ch-row');
+      const state = [];
+      rows.forEach(row => {
+        const key = row.getAttribute('data-key') || '';
+        const url = row.getAttribute('data-url') || '';
+        const cb = row.querySelector('.ch-cb');
+        const numInput = row.querySelector('.ch-num-input');
+        state.push({
+          key: key,
+          url: url,
+          num: numInput ? numInput.value.trim() : '',
+          enabled: cb ? cb.checked : false
+        });
+      });
+      const hiddenInput = document.getElementById('channelStateJSON');
+      if (hiddenInput) {
+        hiddenInput.value = JSON.stringify(state);
+      }
+    }
+
     function updateThemeBtn() {
       const current = document.documentElement.getAttribute('data-theme') || 'dark';
       const btn = document.getElementById('themeToggle');
@@ -302,6 +446,7 @@ const uiTemplate = `<!DOCTYPE html>
         btn.textContent = current === 'dark' ? '☀️ Daytime Theme' : '🌙 Nighttime Theme';
       }
     }
+
     function toggleTheme() {
       const current = document.documentElement.getAttribute('data-theme') || 'dark';
       const next = current === 'dark' ? 'light' : 'dark';
@@ -309,6 +454,7 @@ const uiTemplate = `<!DOCTYPE html>
       localStorage.setItem('st_theme', next);
       updateThemeBtn();
     }
+
     updateThemeBtn();
   </script>
 </body>
@@ -502,6 +648,7 @@ func fetchAndParseM3U(url string, tag string, group string, baseOffset int) ([]C
 		} else if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
 			if len(parsed) > 0 && parsed[len(parsed)-1].URL == "" {
 				parsed[len(parsed)-1].URL = line
+				parsed[len(parsed)-1].Key = makeChannelKey(parsed[len(parsed)-1].GuideName, line)
 			}
 		}
 	}
@@ -536,6 +683,7 @@ func parseCustomChannels(text string) []Channel {
 				name = "[AU] " + name
 			}
 			list = append(list, Channel{
+				Key:         makeChannelKey(name, streamURL),
 				GuideNumber: guideNo,
 				GuideName:   name,
 				URL:         streamURL,
@@ -563,6 +711,46 @@ func matchesFilter(name string, filterKeywords string) bool {
 	return false
 }
 
+func sortChannels(list []Channel) {
+	sort.Slice(list, func(i, j int) bool {
+		numI, errI := strconv.Atoi(list[i].GuideNumber)
+		numJ, errJ := strconv.Atoi(list[j].GuideNumber)
+		if errI == nil && errJ == nil {
+			if numI != numJ {
+				return numI < numJ
+			}
+		} else if list[i].GuideNumber != list[j].GuideNumber {
+			return list[i].GuideNumber < list[j].GuideNumber
+		}
+		return list[i].GuideName < list[j].GuideName
+	})
+}
+
+func applySavedChannelState(list []Channel) {
+	for i := range list {
+		k := list[i].Key
+		u := list[i].URL
+
+		if appConfig.CustomNumbers != nil {
+			if overrideNo, ok := appConfig.CustomNumbers[k]; ok && overrideNo != "" {
+				list[i].GuideNumber = overrideNo
+			} else if overrideNo, ok := appConfig.CustomNumbers[u]; ok && overrideNo != "" {
+				list[i].GuideNumber = overrideNo
+			}
+		}
+
+		if appConfig.EnabledChannels != nil && (appConfig.EnabledChannels[k] || appConfig.EnabledChannels[u]) {
+			list[i].Enabled = true
+		} else if appConfig.DisabledChannels != nil && (appConfig.DisabledChannels[k] || appConfig.DisabledChannels[u]) {
+			list[i].Enabled = false
+		} else if strings.TrimSpace(appConfig.FilterKeywords) != "" {
+			list[i].Enabled = matchesFilter(list[i].GuideName, appConfig.FilterKeywords)
+		} else {
+			list[i].Enabled = true
+		}
+	}
+}
+
 func loadAllChannels() {
 	var combined []Channel
 
@@ -587,7 +775,7 @@ func loadAllChannels() {
 	for _, cust := range customs {
 		replaced := false
 		for i := range combined {
-			if combined[i].GuideNumber == cust.GuideNumber || combined[i].URL == cust.URL {
+			if combined[i].Key == cust.Key || combined[i].URL == cust.URL {
 				combined[i] = cust
 				replaced = true
 				break
@@ -598,32 +786,8 @@ func loadAllChannels() {
 		}
 	}
 
-	for i := range combined {
-		if appConfig.CustomNumbers != nil {
-			if overrideNo, exists := appConfig.CustomNumbers[combined[i].URL]; exists && overrideNo != "" {
-				combined[i].GuideNumber = overrideNo
-			}
-		}
-
-		nameMatch := matchesFilter(combined[i].GuideName, appConfig.FilterKeywords)
-		if !nameMatch {
-			combined[i].Enabled = false
-		} else if appConfig.DisabledChannels != nil {
-			if disabled := appConfig.DisabledChannels[combined[i].URL]; disabled {
-				combined[i].Enabled = false
-			}
-		}
-	}
-
-	sort.Slice(combined, func(i, j int) bool {
-		numI, errI := strconv.Atoi(combined[i].GuideNumber)
-		numJ, errJ := strconv.Atoi(combined[j].GuideNumber)
-		if errI == nil && errJ == nil {
-			return numI < numJ
-		}
-		return combined[i].GuideNumber < combined[j].GuideNumber
-	})
-
+	applySavedChannelState(combined)
+	sortChannels(combined)
 	channels = combined
 }
 
@@ -798,6 +962,7 @@ func loadConfig() {
 		CustomChannels:   "",
 		XMLTVURLs:        "",
 		FilterKeywords:   "",
+		EnabledChannels:  make(map[string]bool),
 		DisabledChannels: make(map[string]bool),
 		CustomNumbers:    make(map[string]string),
 	}
@@ -812,6 +977,9 @@ func loadConfig() {
 	}
 	if appConfig.XMLTVURLs == "" && appConfig.XMLTVURL != "" {
 		appConfig.XMLTVURLs = appConfig.XMLTVURL
+	}
+	if appConfig.EnabledChannels == nil {
+		appConfig.EnabledChannels = make(map[string]bool)
 	}
 	if appConfig.DisabledChannels == nil {
 		appConfig.DisabledChannels = make(map[string]bool)
@@ -879,11 +1047,13 @@ func main() {
 			Config      Config
 			Channels    []Channel
 			ActiveCount int
+			Saved       bool
 		}{
 			Version:     appVersion,
 			Config:      appConfig,
 			Channels:    channels,
 			ActiveCount: active,
+			Saved:       r.URL.Query().Get("saved") == "1",
 		}
 		configLock.RUnlock()
 		tmpl.Execute(w, data)
@@ -944,75 +1114,114 @@ func main() {
 				go refreshEPG()
 			}
 		}
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, "/?saved=1", http.StatusSeeOther)
 	})
 
-	// Save Settings
+	// Save Settings & Channel Selections
 	http.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
-		r.ParseForm()
+		r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+		if err := r.ParseForm(); err != nil {
+			log.Printf("Form parse error: %v", err)
+		}
 
 		tCount, _ := strconv.Atoi(r.FormValue("tuner_count"))
 		if tCount < 1 {
 			tCount = 1
 		}
 
-		activeList := r.Form["active_channels"]
-		activeMap := make(map[string]bool)
-		for _, u := range activeList {
-			activeMap[u] = true
-		}
+		actionType := r.FormValue("action_type")
+		stateJSON := r.FormValue("channel_state_json")
 
-		chURLs := r.Form["ch_url"]
-		chNums := r.Form["ch_num"]
+		configLock.Lock()
+
+		newEnabled := make(map[string]bool)
+		newDisabled := make(map[string]bool)
 		newCustomNumbers := make(map[string]string)
+
 		if appConfig.CustomNumbers != nil {
 			for k, v := range appConfig.CustomNumbers {
 				newCustomNumbers[k] = v
 			}
 		}
-		if len(chURLs) == len(chNums) {
-			for i := range chURLs {
-				targetURL := chURLs[i]
-				numVal := strings.TrimSpace(chNums[i])
-				if numVal != "" {
-					newCustomNumbers[targetURL] = numVal
+
+		var updates []ChannelStateUpdate
+		if stateJSON != "" && json.Unmarshal([]byte(stateJSON), &updates) == nil && len(updates) > 0 {
+			updateMap := make(map[string]ChannelStateUpdate, len(updates))
+			for _, u := range updates {
+				updateMap[u.Key] = u
+				if u.Num != "" {
+					newCustomNumbers[u.Key] = u.Num
+					if u.URL != "" {
+						newCustomNumbers[u.URL] = u.Num
+					}
+				}
+				if u.Enabled {
+					newEnabled[u.Key] = true
+					if u.URL != "" {
+						newEnabled[u.URL] = true
+					}
+				} else {
+					newDisabled[u.Key] = true
+					if u.URL != "" {
+						newDisabled[u.URL] = true
+					}
+				}
+			}
+
+			for i := range channels {
+				if u, ok := updateMap[channels[i].Key]; ok {
+					channels[i].Enabled = u.Enabled
+					if u.Num != "" {
+						channels[i].GuideNumber = u.Num
+					}
+				}
+			}
+		} else {
+			for _, c := range channels {
+				if c.Enabled {
+					newEnabled[c.Key] = true
+					newEnabled[c.URL] = true
+				} else {
+					newDisabled[c.Key] = true
+					newDisabled[c.URL] = true
 				}
 			}
 		}
 
-		configLock.Lock()
-		newDisabled := make(map[string]bool)
-		for i := range channels {
-			u := channels[i].URL
-			if activeMap[u] {
-				channels[i].Enabled = true
-			} else {
-				channels[i].Enabled = false
-				newDisabled[u] = true
-			}
-		}
+		newM3U := strings.TrimSpace(r.FormValue("m3u_urls"))
+		newCustom := strings.TrimSpace(r.FormValue("custom_channels"))
+		newFilter := strings.TrimSpace(r.FormValue("filter_keywords"))
+		sourcesChanged := (newM3U != appConfig.M3UURLs) || (newCustom != appConfig.CustomChannels) || (newFilter != appConfig.FilterKeywords)
 
 		appConfig.FriendlyName = "StreamTuner"
 		appConfig.TunerCount = tCount
-		appConfig.M3UURLs = strings.TrimSpace(r.FormValue("m3u_urls"))
-		appConfig.CustomChannels = strings.TrimSpace(r.FormValue("custom_channels"))
+		appConfig.M3UURLs = newM3U
+		appConfig.CustomChannels = newCustom
 		appConfig.XMLTVURLs = strings.TrimSpace(r.FormValue("xmltv_urls"))
-		appConfig.FilterKeywords = strings.TrimSpace(r.FormValue("filter_keywords"))
+		appConfig.FilterKeywords = newFilter
+		appConfig.EnabledChannels = newEnabled
 		appConfig.DisabledChannels = newDisabled
 		appConfig.CustomNumbers = newCustomNumbers
 
-		loadAllChannels()
+		if actionType == "reload_feeds" || sourcesChanged || len(channels) == 0 {
+			loadAllChannels()
+		} else {
+			sortChannels(channels)
+		}
+
 		cfgCopy := appConfig
 		configLock.Unlock()
 
-		saveConfig(cfgCopy)
+		if err := saveConfig(cfgCopy); err != nil {
+			log.Printf("Failed to save settings.json: %v", err)
+		}
 		go refreshEPG()
 
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, "/?saved=1", http.StatusSeeOther)
 	})
 
 	// M3U Playlist Endpoint
