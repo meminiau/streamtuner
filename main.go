@@ -22,6 +22,8 @@ import (
 	"time"
 )
 
+var appVersion = "v1.0.0"
+
 type Config struct {
 	FriendlyName     string            `json:"friendly_name"`
 	TunerCount       int               `json:"tuner_count"`
@@ -80,94 +82,92 @@ var (
 )
 
 const uiTemplate = `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>StreamTuner Dashboard</title>
+  <script>
+    (function() {
+      const savedTheme = localStorage.getItem('st_theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', savedTheme);
+    })();
+  </script>
   <style>
     :root {
       --bg: #0e131f;
       --card: #182032;
+      --input-bg: #0c101a;
       --border: #243049;
       --accent: #00d2c4;
       --accent-hover: #00b3a6;
+      --btn-text: #051015;
       --text: #f0f4f8;
       --text-muted: #8e9eb5;
     }
+    html[data-theme="light"] {
+      --bg: #f1f5f9;
+      --card: #ffffff;
+      --input-bg: #f8fafc;
+      --border: #cbd5e1;
+      --accent: #0d9488;
+      --accent-hover: #0f766e;
+      --btn-text: #ffffff;
+      --text: #0f172a;
+      --text-muted: #475569;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; }
+    body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; transition: background 0.2s, color 0.2s; }
     .container { width: 100%; max-width: 960px; }
-    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 10px; }
+    header { margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    .header-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
     .logo-group { display: flex; align-items: center; gap: 10px; }
-    .logo-group h1 { font-size: 1.4rem; color: var(--accent); }
+    .logo-group h1 { font-size: 1.5rem; color: var(--accent); }
     .badge { background: var(--border); color: var(--accent); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
-    .header-links { display: flex; gap: 12px; align-items: center; }
-    .header-links a { color: var(--accent); font-size: 0.85rem; text-decoration: none; font-weight: 500; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+    .app-desc { color: var(--text-muted); font-size: 0.9rem; line-height: 1.5; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
     .card h2 { font-size: 1.15rem; margin-bottom: 14px; color: var(--text); }
     .form-group { margin-bottom: 14px; }
     label { display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
-    input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px 12px; background: #0c101a; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; }
+    input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px 12px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; }
     textarea { resize: vertical; min-height: 80px; font-family: monospace; font-size: 0.85rem; }
     input:focus, textarea:focus { outline: none; border-color: var(--accent); }
-    .btn { background: var(--accent); color: #051015; border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; text-decoration: none; display: inline-block; }
+    .btn { background: var(--accent); color: var(--btn-text); border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; text-decoration: none; display: inline-block; }
     .btn:hover { background: var(--accent-hover); }
     .btn-secondary { background: var(--border); color: var(--text); font-weight: 600; padding: 7px 12px; font-size: 0.8rem; border-radius: 6px; text-decoration: none; cursor: pointer; border: 1px solid var(--border); }
     .btn-secondary:hover { border-color: var(--accent); }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
     .stat-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-align: center; }
-    .stat-box .label { font-size: 0.8rem; color: var(--text-muted); }
+    .stat-box .label { font-size: 0.8rem; color: var(--text-muted); font-weight: 500; }
     .stat-box .val { font-size: 1.6rem; font-weight: 700; color: var(--accent); margin-top: 4px; }
     .table-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
-    
-    /* Scrollable Channel Table Window */
-    .table-container {
-      max-height: 480px;
-      overflow-y: auto;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #0c101a;
-    }
+    .table-container { max-height: 480px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--input-bg); }
     .channel-table { width: 100%; border-collapse: collapse; }
     .channel-table th, .channel-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
-    .channel-table th {
-      position: sticky;
-      top: 0;
-      background: #182032;
-      z-index: 2;
-      color: var(--text-muted);
-      font-weight: 600;
-      border-bottom: 2px solid var(--border);
-    }
-    .num-input {
-      width: 58px;
-      padding: 5px 6px;
-      background: #182032;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      color: var(--accent);
-      font-weight: 700;
-      text-align: center;
-      font-size: 0.85rem;
-    }
+    .channel-table th { position: sticky; top: 0; background: var(--card); z-index: 2; color: var(--text-muted); font-weight: 600; border-bottom: 2px solid var(--border); }
+    .num-input { width: 58px; padding: 5px 6px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; color: var(--accent); font-weight: 700; text-align: center; font-size: 0.85rem; }
     .num-input:focus { border-color: var(--accent); outline: none; }
     .group-pill { background: var(--border); padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; color: var(--text-muted); }
     input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
-    .backup-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 10px; border-top: 1px solid var(--border); margin-top: 16px; }
+    .backup-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 12px; border-top: 1px solid var(--border); margin-top: 16px; }
+    .info-list { margin: 10px 0 16px 18px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.6; }
+    .info-list li { margin-bottom: 6px; }
+    .info-list strong { color: var(--text); }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
-      <div class="logo-group">
-        <h1>StreamTuner</h1>
-        <span class="badge">v0.7.0</span>
+      <div class="header-top">
+        <div class="logo-group">
+          <h1>StreamTuner</h1>
+          <span class="badge">{{.Version}}</span>
+        </div>
+        <button type="button" id="themeToggle" class="btn-secondary" onclick="toggleTheme()">☀️ Daytime Theme</button>
       </div>
-      <div class="header-links">
-        <a href="/lineup.json" target="_blank">Lineup JSON</a>
-        <a href="/epg.xml" target="_blank">Aggregated EPG XML</a>
-      </div>
+      <p class="app-desc">
+        StreamTuner is a high-stability IPTV tuner proxy, stream-repair engine, and multi-region EPG aggregator. Use it to combine live M3U playlists from around the world, automatically organize station numbers by country, prevent stream drops during commercial breaks, and feed a unified broadcast lineup into Jellyfin, Plex, or Emby.
+      </p>
     </header>
 
     <div class="stats">
@@ -176,11 +176,11 @@ const uiTemplate = `<!DOCTYPE html>
         <div class="val">{{.Config.TunerCount}}</div>
       </div>
       <div class="stat-box">
-        <div class="label">Total Ingested</div>
+        <div class="label">Total Stations Found</div>
         <div class="val">{{len .Channels}}</div>
       </div>
       <div class="stat-box">
-        <div class="label">Active in Lineup</div>
+        <div class="label">Stations Sent to Media Server</div>
         <div class="val">{{.ActiveCount}}</div>
       </div>
     </div>
@@ -189,11 +189,7 @@ const uiTemplate = `<!DOCTYPE html>
       <div class="card">
         <h2>Configuration &amp; Sources</h2>
         <div class="form-group">
-          <label>Friendly Name</label>
-          <input type="text" name="friendly_name" value="{{.Config.FriendlyName}}" required>
-        </div>
-        <div class="form-group">
-          <label>Virtual Tuners</label>
+          <label>Virtual Tuners (Simultaneous Streams Allowed)</label>
           <input type="number" name="tuner_count" value="{{.Config.TunerCount}}" min="1" max="32" required>
         </div>
         <div class="form-group">
@@ -228,7 +224,7 @@ const uiTemplate = `<!DOCTYPE html>
 
       <div class="card">
         <div class="table-actions">
-          <h2>Channel Lineup ({{len .Channels}})</h2>
+          <h2>Live TV Channels ({{len .Channels}})</h2>
           <div style="display: flex; gap: 8px;">
             <button type="button" class="btn-secondary" onclick="toggleAll(true)">Select All</button>
             <button type="button" class="btn-secondary" onclick="toggleAll(false)">Deselect All</button>
@@ -274,18 +270,23 @@ const uiTemplate = `<!DOCTYPE html>
       </div>
     </form>
 
-    <!-- Hidden form for config file restore -->
     <form id="importForm" action="/import-config" method="POST" enctype="multipart/form-data" style="display: none;">
       <input type="file" id="importFile" name="config_file" accept=".json" onchange="document.getElementById('importForm').submit()">
     </form>
 
-    <!-- Option 4: Switch to M3U Tuner Mode -->
     <div class="card" style="border-left: 4px solid var(--accent);">
-      <h2>Option 4: Setup Native Jellyfin Category Tabs (M3U Mode)</h2>
-      <p style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; margin-bottom: 12px;">
-        Want Jellyfin to display clean category tabs (<strong>Australia</strong>, <strong>United States</strong>, <strong>Canada</strong>, <strong>Japan</strong>) across the top of your Live TV screen instead of one giant mixed list?
+      <h2>Optional Settings</h2>
+      <p style="color: var(--text); font-size: 0.95rem; font-weight: 500; line-height: 1.5; margin-bottom: 10px;">
+        Would you like your Media Server to display clean category tabs (<strong>Australia</strong>, <strong>United States</strong>, <strong>Canada</strong>, <strong>Japan</strong>) across the top of your Live TV screen instead of one giant mixed list?
       </p>
-      <a href="/m3u-mode" class="btn btn-secondary">Open M3U Tuner Setup &rarr;</a>
+      <p style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.5;">
+        <strong>What this section does:</strong> By default, StreamTuner emulates a hardware HDHomeRun tuner. While HDHomeRun is plug-and-play, the HDHomeRun specification does not support category folders—so every station is placed into a single list. StreamTuner also generates a dedicated <strong>M3U Playlist endpoint</strong> that embeds regional category tags (<code>group-title</code>) alongside your repaired video streams.
+      </p>
+      <ul class="info-list">
+        <li><strong>For Jellyfin / Emby Users:</strong> Instead of adding StreamTuner as an HDHomeRun device, you can add it as an <strong>M3U Tuner</strong> using the links on the next screen. Jellyfin will automatically read the embedded country tags and display filterable category tabs at the top of your Live TV guide.</li>
+        <li><strong>For Plex Users:</strong> Plex DVR only accepts HDHomeRun connections and does not natively support M3U URLs or category tabs. Plex users should remain in standard HDHomeRun mode, where StreamTuner automatically separates countries by channel number blocks (1–99 for Australia, 1000+ for US, 2000+ for Canada, 3000+ for Japan).</li>
+      </ul>
+      <a href="/m3u-mode" class="btn btn-secondary">Open M3U Category Setup &amp; Endpoints &rarr;</a>
     </div>
   </div>
 
@@ -294,63 +295,92 @@ const uiTemplate = `<!DOCTYPE html>
       const boxes = document.querySelectorAll('input[name="active_channels"]');
       boxes.forEach(cb => cb.checked = status);
     }
+    function updateThemeBtn() {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      const btn = document.getElementById('themeToggle');
+      if (btn) {
+        btn.textContent = current === 'dark' ? '☀️ Daytime Theme' : '🌙 Nighttime Theme';
+      }
+    }
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('st_theme', next);
+      updateThemeBtn();
+    }
+    updateThemeBtn();
   </script>
 </body>
 </html>`
 
 const m3uModeTemplate = `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>StreamTuner - M3U Tuner Mode Setup</title>
+  <title>StreamTuner - Optional M3U Category Setup</title>
+  <script>
+    (function() {
+      const savedTheme = localStorage.getItem('st_theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', savedTheme);
+    })();
+  </script>
   <style>
     :root {
       --bg: #0e131f;
       --card: #182032;
+      --input-bg: #0c101a;
       --border: #243049;
       --accent: #00d2c4;
+      --btn-text: #051015;
       --text: #f0f4f8;
       --text-muted: #8e9eb5;
+    }
+    html[data-theme="light"] {
+      --bg: #f1f5f9;
+      --card: #ffffff;
+      --input-bg: #f8fafc;
+      --border: #cbd5e1;
+      --accent: #0d9488;
+      --btn-text: #ffffff;
+      --text: #0f172a;
+      --text-muted: #475569;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; }
     .container { width: 100%; max-width: 800px; }
-    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 10px; }
     h1 { font-size: 1.4rem; color: var(--accent); }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 20px; line-height: 1.5; }
-    .url-box { background: #0c101a; border: 1px solid var(--border); padding: 12px; border-radius: 8px; font-family: monospace; font-size: 0.9rem; color: var(--accent); word-break: break-all; margin: 8px 0 16px 0; }
-    .btn { background: var(--accent); color: #051015; border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; text-decoration: none; display: inline-block; }
-    .step { margin-bottom: 16px; }
+    .url-box { background: var(--input-bg); border: 1px solid var(--border); padding: 12px; border-radius: 8px; font-family: monospace; font-size: 0.9rem; color: var(--accent); word-break: break-all; margin: 8px 0 16px 0; }
+    .btn { background: var(--accent); color: var(--btn-text); border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; text-decoration: none; display: inline-block; }
+    .step { margin-bottom: 16px; font-size: 0.9rem; }
     .step strong { color: var(--accent); }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>M3U Tuner Mode Setup</h1>
+      <h1>M3U Category Mode &amp; Endpoints</h1>
       <a href="/" class="btn" style="padding: 6px 12px; font-size: 0.8rem;">&larr; Back to Dashboard</a>
     </header>
 
     <div class="card">
-      <h2 style="font-size: 1.2rem; margin-bottom: 10px;">Why Use M3U Tuner Mode?</h2>
-      <p style="color: var(--text-muted); font-size: 0.9rem;">
-        The HDHomeRun protocol does not support folder or category tags. By connecting Jellyfin to StreamTuner using its dedicated M3U playlist endpoint instead, Jellyfin will automatically group your channels into tabs (<strong>Australia</strong>, <strong>United States</strong>, <strong>Canada</strong>, <strong>Japan</strong>) for every user.
-      </p>
-    </div>
+      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">StreamTuner Direct Endpoints</h2>
 
-    <div class="card">
-      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">Your Generated StreamTuner Endpoints</h2>
-
-      <div style="font-size: 0.85rem; color: var(--text-muted);">M3U Playlist URL (With Native Category Tags):</div>
+      <div style="font-size: 0.85rem; color: var(--text-muted);">M3U Playlist URL (Includes Category Group Tags for Jellyfin/Emby):</div>
       <div class="url-box">{{.BaseURL}}/channels.m3u</div>
 
-      <div style="font-size: 0.85rem; color: var(--text-muted);">Aggregated XMLTV EPG URL:</div>
+      <div style="font-size: 0.85rem; color: var(--text-muted);">Aggregated XMLTV EPG URL (Filtered to Active Stations Only):</div>
       <div class="url-box">{{.BaseURL}}/epg.xml</div>
+
+      <div style="font-size: 0.85rem; color: var(--text-muted);">HDHomeRun Lineup URL (Standard Mode for Plex/Jellyfin):</div>
+      <div class="url-box">{{.BaseURL}}/lineup.json</div>
     </div>
 
     <div class="card">
-      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">Setup Instructions for Jellyfin</h2>
+      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">How to Enable Category Tabs in Jellyfin</h2>
       <div class="step">
         <strong>1. Remove Existing HDHomeRun Tuner:</strong> In Jellyfin, go to <em>Dashboard &gt; Live TV</em>. Under <em>Tuner Devices</em>, delete the existing StreamTuner HDHomeRun entry.
       </div>
@@ -362,14 +392,14 @@ const m3uModeTemplate = `<!DOCTYPE html>
         <div style="font-family: monospace; color: var(--accent); margin-top: 4px;">{{.BaseURL}}/channels.m3u</div>
       </div>
       <div class="step">
-        <strong>4. Set Simultaneous Stream Limit:</strong> Set the limit to <strong>4</strong> (or your preferred tuner count).
+        <strong>4. Set Simultaneous Stream Limit:</strong> Set the limit to match your Virtual Tuners count.
       </div>
       <div class="step">
-        <strong>5. Connect Guide:</strong> Under <em>TV Guide Data Providers</em>, add an XMLTV provider with:
+        <strong>5. Connect Guide:</strong> Under <em>TV Guide Data Providers</em>, ensure your XMLTV provider points to:
         <div style="font-family: monospace; color: var(--accent); margin-top: 4px;">{{.BaseURL}}/epg.xml</div>
       </div>
       <div class="step">
-        <strong>6. Done!</strong> When users open Live TV in Jellyfin, they can filter by category tabs across the top screen.
+        <strong>6. Done!</strong> Open Live TV in Jellyfin and use the category filter at the top of the guide to switch between countries.
       </div>
     </div>
   </div>
@@ -444,12 +474,10 @@ func fetchAndParseM3U(url string, tag string, group string, baseOffset int) ([]C
 				}
 			}
 
-			// Prepend country tag if not present
 			if !strings.HasPrefix(currentName, "[") {
 				currentName = fmt.Sprintf("%s %s", tag, currentName)
 			}
 
-			// Assign channel number according to block offset
 			guideNo := fmt.Sprintf("%d", baseOffset+chCounter-1)
 			if m := reTvgChNo.FindStringSubmatch(line); len(m) > 1 {
 				parsedNo, err := strconv.Atoi(m[1])
@@ -555,7 +583,6 @@ func loadAllChannels() {
 		}
 	}
 
-	// Add custom channels
 	customs := parseCustomChannels(appConfig.CustomChannels)
 	for _, cust := range customs {
 		replaced := false
@@ -571,7 +598,6 @@ func loadAllChannels() {
 		}
 	}
 
-	// Apply custom number overrides & enabled filter
 	for i := range combined {
 		if appConfig.CustomNumbers != nil {
 			if overrideNo, exists := appConfig.CustomNumbers[combined[i].URL]; exists && overrideNo != "" {
@@ -589,7 +615,6 @@ func loadAllChannels() {
 		}
 	}
 
-	// Sort channels numerically by GuideNumber
 	sort.Slice(combined, func(i, j int) bool {
 		numI, errI := strconv.Atoi(combined[i].GuideNumber)
 		numJ, errJ := strconv.Atoi(combined[j].GuideNumber)
@@ -782,6 +807,9 @@ func loadConfig() {
 		json.Unmarshal(data, &appConfig)
 	}
 
+	if appConfig.FriendlyName == "" {
+		appConfig.FriendlyName = "StreamTuner"
+	}
 	if appConfig.XMLTVURLs == "" && appConfig.XMLTVURL != "" {
 		appConfig.XMLTVURLs = appConfig.XMLTVURL
 	}
@@ -847,10 +875,12 @@ func main() {
 			}
 		}
 		data := struct {
+			Version     string
 			Config      Config
 			Channels    []Channel
 			ActiveCount int
 		}{
+			Version:     appVersion,
 			Config:      appConfig,
 			Channels:    channels,
 			ActiveCount: active,
@@ -902,6 +932,9 @@ func main() {
 		if err == nil {
 			var newCfg Config
 			if err := json.Unmarshal(data, &newCfg); err == nil {
+				if newCfg.FriendlyName == "" {
+					newCfg.FriendlyName = "StreamTuner"
+				}
 				configLock.Lock()
 				appConfig = newCfg
 				loadAllChannels()
@@ -914,7 +947,7 @@ func main() {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 
-	// Save Settings & Checkbox Toggles & Channel Number Edits
+	// Save Settings
 	http.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -933,7 +966,6 @@ func main() {
 			activeMap[u] = true
 		}
 
-		// Read editable channel numbers
 		chURLs := r.Form["ch_url"]
 		chNums := r.Form["ch_num"]
 		newCustomNumbers := make(map[string]string)
@@ -964,7 +996,7 @@ func main() {
 			}
 		}
 
-		appConfig.FriendlyName = r.FormValue("friendly_name")
+		appConfig.FriendlyName = "StreamTuner"
 		appConfig.TunerCount = tCount
 		appConfig.M3UURLs = strings.TrimSpace(r.FormValue("m3u_urls"))
 		appConfig.CustomChannels = strings.TrimSpace(r.FormValue("custom_channels"))
@@ -983,7 +1015,7 @@ func main() {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 
-	// M3U Playlist Endpoint with native group-title tags
+	// M3U Playlist Endpoint
 	http.HandleFunc("/channels.m3u", func(w http.ResponseWriter, r *http.Request) {
 		configLock.RLock()
 		defer configLock.RUnlock()
@@ -1023,7 +1055,7 @@ func main() {
 
 		baseURL := getBaseURL(r)
 		info := DeviceInfo{
-			FriendlyName:    appConfig.FriendlyName,
+			FriendlyName:    "StreamTuner",
 			ModelNumber:     "HDTC-2US",
 			FirmwareName:    "hdhomeruntc_atsc",
 			FirmwareVersion: "20260101",
@@ -1133,7 +1165,7 @@ func main() {
 		cmd.Wait()
 	})
 
-	log.Printf("StreamTuner running on port %s", port)
+	log.Printf("StreamTuner %s running on port %s", appVersion, port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server failed: %s\n", err)
 	}
