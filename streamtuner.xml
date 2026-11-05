@@ -1,35 +1,24 @@
 <?xml version="1.0"?>
 <Container version="2">
-  <Name>streamtuner</Name>
+  <Name>StreamTuner</Name>
   <Repository>homerj007/streamtuner:latest</Repository>
   <Registry>https://hub.docker.com/r/homerj007/streamtuner</Registry>
   <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support>https://github.com/meminiau/streamtuner/issues</Support>
   <Project>https://github.com/meminiau/streamtuner</Project>
-  <Overview>Lightweight IPTV tuner proxy and HDHomeRun emulator with web configuration dashboard.</Overview>
+  <Overview>StreamTuner is a high-stability IPTV tuner proxy, MPEG-TS stream-repair engine, and multi-region XMLTV EPG aggregator. It ingests live M3U playlists, prevents stream drops during commercial breaks, auto-organizes channel numbering by country, and feeds a unified broadcast lineup to Jellyfin, Plex, and Emby via HDHomeRun or M3U tuner modes.</Overview>
   <Category>MediaApp:Video MediaServer:Video</Category>
-  <WebUI>http://[IP]:[PORT:7070]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/meminiau/streamtuner/main/streamtuner.xml</TemplateURL>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <Icon>https://raw.githubusercontent.com/meminiau/streamtuner/main/icon.png</Icon>
-  <Description>Lightweight IPTV tuner proxy and HDHomeRun emulator with responsive web dashboard.</Description>
-  <Networking>
-    <Mode>bridge</Mode>
-    <Publish>
-      <Port>
-        <HostPort>7070</HostPort>
-        <ContainerPort>8080</ContainerPort>
-        <Protocol>tcp</Protocol>
-      </Port>
-    </Publish>
-  </Networking>
-  <Data>
-    <Volume>
-      <HostDir>/mnt/user/appdata/streamtuner</HostDir>
-      <ContainerDir>/config</ContainerDir>
-      <Mode>rw</Mode>
-    </Volume>
-  </Data>
-  <Config Name="Web Port" Target="8080" Default="7070" Mode="tcp" Description="Web Dashboard &amp; HDHomeRun port" Type="Port" Display="always" Required="true" Mask="false">7070</Config>
-  <Config Name="AppData Storage" Target="/config" Default="/mnt/user/appdata/streamtuner" Mode="rw" Description="Settings and channel cache storage" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/streamtuner</Config>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="WebUI and HDHomeRun Port" Target="8080" Default="7070" Mode="tcp" Description="Port for the StreamTuner Web Dashboard, HDHomeRun emulator, and M3U/EPG endpoints." Type="Port" Display="always" Required="true" Mask="false">7070</Config>
+  <Config Name="AppData Config Path" Target="/config" Default="/mnt/user/appdata/streamtuner" Mode="rw" Description="Persistent storage for settings.json and aggregated EPG data." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/streamtuner</Config>
 </Container>
