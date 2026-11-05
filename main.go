@@ -25,6 +25,7 @@ type Config struct {
 	FriendlyName     string          `json:"friendly_name"`
 	TunerCount       int             `json:"tuner_count"`
 	M3UURLs          string          `json:"m3u_urls"`
+	CustomChannels   string          `json:"custom_channels"`
 	XMLTVURLs        string          `json:"xmltv_urls"`
 	XMLTVURL         string          `json:"xmltv_url,omitempty"`
 	FilterKeywords   string          `json:"filter_keywords"`
@@ -127,7 +128,7 @@ const uiTemplate = `<!DOCTYPE html>
     <header>
       <div class="logo-group">
         <h1>StreamTuner</h1>
-        <span class="badge">v0.5.0</span>
+        <span class="badge">v0.6.0</span>
       </div>
       <div class="header-links">
         <a href="/lineup.json" target="_blank">Lineup JSON</a>
@@ -164,6 +165,10 @@ const uiTemplate = `<!DOCTYPE html>
         <div class="form-group">
           <label>M3U / M3U8 Playlist URLs (One URL per line)</label>
           <textarea name="m3u_urls" placeholder="https://example.com/playlist1.m3u8&#10;https://example.com/playlist2.m3u8">{{.Config.M3UURLs}}</textarea>
+        </div>
+        <div class="form-group">
+          <label>Custom Overrides &amp; Direct Channels (Format: Number, Name, Stream URL, EPG_ID)</label>
+          <textarea name="custom_channels" placeholder="9, Channel 9 HD, https://9now-livestreams-fhd-t.akamaized.net/u/prod/simulcast/syd/ch9/hls/r1/index.m3u8, mjh-channel-9-nsw">{{.Config.CustomChannels}}</textarea>
         </div>
         <div class="form-group">
           <label>XMLTV EPG URLs (One URL per line — supports .xml and .xml.gz)</label>
@@ -303,6 +308,35 @@ func fetchAndParseM3U(url string, startChNum int) ([]Channel, int, error) {
 	return cleaned, chNum, nil
 }
 
+func parseCustomChannels(text string) []Channel {
+	var list []Channel
+	lines := strings.Split(text, "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.Split(trimmed, ",")
+		if len(parts) >= 3 {
+			guideNo := strings.TrimSpace(parts[0])
+			name := strings.TrimSpace(parts[1])
+			streamURL := strings.TrimSpace(parts[2])
+			tvgID := ""
+			if len(parts) >= 4 {
+				tvgID = strings.TrimSpace(parts[3])
+			}
+			list = append(list, Channel{
+				GuideNumber: guideNo,
+				GuideName:   name,
+				URL:         streamURL,
+				TvgID:       tvgID,
+				Enabled:     true,
+			})
+		}
+	}
+	return list
+}
+
 func matchesFilter(name string, filterKeywords string) bool {
 	if strings.TrimSpace(filterKeywords) == "" {
 		return true
@@ -319,27 +353,40 @@ func matchesFilter(name string, filterKeywords string) bool {
 }
 
 func loadAllChannels() {
-	if appConfig.M3UURLs == "" {
-		channels = nil
-		return
-	}
-
-	urls := strings.Split(appConfig.M3UURLs, "\n")
 	var combined []Channel
 	nextCh := 1
 
-	for _, u := range urls {
-		trimmed := strings.TrimSpace(u)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
+	if appConfig.M3UURLs != "" {
+		urls := strings.Split(appConfig.M3UURLs, "\n")
+		for _, u := range urls {
+			trimmed := strings.TrimSpace(u)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			chList, next, err := fetchAndParseM3U(trimmed, nextCh)
+			if err != nil {
+				log.Printf("Error fetching playlist %s: %v", trimmed, err)
+				continue
+			}
+			combined = append(combined, chList...)
+			nextCh = next
 		}
-		chList, next, err := fetchAndParseM3U(trimmed, nextCh)
-		if err != nil {
-			log.Printf("Error fetching playlist %s: %v", trimmed, err)
-			continue
+	}
+
+	// Insert or override custom channels
+	customs := parseCustomChannels(appConfig.CustomChannels)
+	for _, cust := range customs {
+		replaced := false
+		for i := range combined {
+			if combined[i].GuideNumber == cust.GuideNumber {
+				combined[i] = cust
+				replaced = true
+				break
+			}
 		}
-		combined = append(combined, chList...)
-		nextCh = next
+		if !replaced {
+			combined = append([]Channel{cust}, combined...)
+		}
 	}
 
 	for i := range combined {
@@ -524,6 +571,7 @@ func loadConfig() {
 		FriendlyName:     "StreamTuner",
 		TunerCount:       4,
 		M3UURLs:          "",
+		CustomChannels:   "",
 		XMLTVURLs:        "",
 		FilterKeywords:   "",
 		DisabledChannels: make(map[string]bool),
@@ -572,7 +620,6 @@ func main() {
 
 	loadConfig()
 
-	// Periodic 12-hour EPG refresh
 	go func() {
 		time.Sleep(5 * time.Second)
 		refreshEPG()
@@ -582,7 +629,7 @@ func main() {
 		}
 	}()
 
-	// Web Dashboard
+	// Dashboard
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -609,7 +656,7 @@ func main() {
 		tmpl.Execute(w, data)
 	})
 
-	// Save Settings & Checkbox Toggles
+	// Save
 	http.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -643,6 +690,7 @@ func main() {
 		appConfig.FriendlyName = r.FormValue("friendly_name")
 		appConfig.TunerCount = tCount
 		appConfig.M3UURLs = strings.TrimSpace(r.FormValue("m3u_urls"))
+		appConfig.CustomChannels = strings.TrimSpace(r.FormValue("custom_channels"))
 		appConfig.XMLTVURLs = strings.TrimSpace(r.FormValue("xmltv_urls"))
 		appConfig.FilterKeywords = strings.TrimSpace(r.FormValue("filter_keywords"))
 		appConfig.DisabledChannels = newDisabled
@@ -699,7 +747,7 @@ func main() {
 		json.NewEncoder(w).Encode(status)
 	})
 
-	// HDHomeRun Lineup
+	// Lineup JSON
 	http.HandleFunc("/lineup.json", func(w http.ResponseWriter, r *http.Request) {
 		configLock.RLock()
 		defer configLock.RUnlock()
@@ -724,7 +772,7 @@ func main() {
 		json.NewEncoder(w).Encode(lineup)
 	})
 
-	// Live Stream Proxy
+	// Proxy
 	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
 		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
 		var targetURL string
