@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,17 @@ import (
 	"time"
 )
 
-var appVersion = "v1.0.0"
+var appVersion = "v2.0.0"
+
+type VPNProfile struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"` // socks5 or http
+	Host     string `json:"host"`
+	Port     string `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
 
 type Config struct {
 	FriendlyName     string            `json:"friendly_name"`
@@ -35,6 +46,9 @@ type Config struct {
 	EnabledChannels  map[string]bool   `json:"enabled_channels"`
 	DisabledChannels map[string]bool   `json:"disabled_channels"`
 	CustomNumbers    map[string]string `json:"custom_numbers"`
+	VPNProfilesText  string            `json:"vpn_profiles_text"`
+	VPNProfiles      []VPNProfile      `json:"vpn_profiles"`
+	ChannelRoutes    map[string]string `json:"channel_routes"`
 }
 
 type Channel struct {
@@ -46,6 +60,7 @@ type Channel struct {
 	TvgID       string `json:"TvgID,omitempty"`
 	Group       string `json:"Group,omitempty"`
 	Enabled     bool   `json:"Enabled"`
+	Route       string `json:"Route"`
 }
 
 type ChannelStateUpdate struct {
@@ -53,6 +68,7 @@ type ChannelStateUpdate struct {
 	URL     string `json:"url"`
 	Num     string `json:"num"`
 	Enabled bool   `json:"enabled"`
+	Route   string `json:"route"`
 }
 
 type DeviceInfo struct {
@@ -94,7 +110,46 @@ func makeChannelKey(name, streamURL string) string {
 	return strings.TrimSpace(name) + "|" + strings.TrimSpace(streamURL)
 }
 
-const uiTemplate = `<!DOCTYPE html>
+func parseVPNProfiles(text string) []VPNProfile {
+	var list []VPNProfile
+	lines := strings.Split(text, "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.Split(trimmed, ",")
+		if len(parts) >= 5 {
+			id := strings.ToLower(strings.TrimSpace(parts[0]))
+			name := strings.TrimSpace(parts[1])
+			proto := strings.ToLower(strings.TrimSpace(parts[2]))
+			if proto != "http" && proto != "socks5" {
+				proto = "socks5"
+			}
+			host := strings.TrimSpace(parts[3])
+			port := strings.TrimSpace(parts[4])
+			user := ""
+			pass := ""
+			if len(parts) >= 6 {
+				user = strings.TrimSpace(parts[5])
+			}
+			if len(parts) >= 7 {
+				pass = strings.TrimSpace(parts[6])
+			}
+			list = append(list, VPNProfile{
+				ID:       id,
+				Name:     name,
+				Type:     proto,
+				Host:     host,
+				Port:     port,
+				Username: user,
+				Password: pass,
+			})
+		}
+	}
+	return list
+}
+const uiTemplateHead = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
@@ -117,6 +172,8 @@ const uiTemplate = `<!DOCTYPE html>
       --btn-text: #051015;
       --text: #f0f4f8;
       --text-muted: #8e9eb5;
+      --purple: #8b5cf6;
+      --purple-hover: #7c3aed;
       --success-bg: rgba(16, 185, 129, 0.15);
       --success-border: #10b981;
     }
@@ -130,12 +187,14 @@ const uiTemplate = `<!DOCTYPE html>
       --btn-text: #ffffff;
       --text: #0f172a;
       --text-muted: #475569;
+      --purple: #7c3aed;
+      --purple-hover: #6d28d9;
       --success-bg: rgba(13, 148, 136, 0.12);
       --success-border: #0d9488;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; transition: background 0.2s, color 0.2s; }
-    .container { width: 100%; max-width: 960px; }
+    .container { width: 100%; max-width: 990px; }
     header { margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
     .header-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
     .logo-group { display: flex; align-items: center; gap: 10px; }
@@ -147,17 +206,18 @@ const uiTemplate = `<!DOCTYPE html>
     .card h2 { font-size: 1.15rem; margin-bottom: 14px; color: var(--text); }
     .form-group { margin-bottom: 14px; }
     label { display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
-    input[type="text"], input[type="number"], select, textarea { width: 100%; padding: 10px 12px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; }
+    input[type="text"], input[type="password"], input[type="number"], select, textarea { width: 100%; padding: 10px 12px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; }
     textarea { resize: vertical; min-height: 80px; font-family: monospace; font-size: 0.85rem; }
     input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
     .btn { background: var(--accent); color: var(--btn-text); border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: background 0.2s; text-decoration: none; display: inline-block; }
     .btn:hover { background: var(--accent-hover); }
     .btn-secondary { background: var(--border); color: var(--text); font-weight: 600; padding: 7px 12px; font-size: 0.8rem; border-radius: 6px; text-decoration: none; cursor: pointer; border: 1px solid var(--border); }
     .btn-secondary:hover { border-color: var(--accent); }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
     .stat-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-align: center; }
     .stat-box .label { font-size: 0.8rem; color: var(--text-muted); font-weight: 500; }
     .stat-box .val { font-size: 1.6rem; font-weight: 700; color: var(--accent); margin-top: 4px; }
+    .stat-box .val.purple { color: var(--purple); }
     .table-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
     .search-bar { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; margin-bottom: 12px; }
     @media (max-width: 640px) {
@@ -168,14 +228,33 @@ const uiTemplate = `<!DOCTYPE html>
     .channel-table { width: 100%; border-collapse: collapse; }
     .channel-table th, .channel-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
     .channel-table th { position: sticky; top: 0; background: var(--card); z-index: 2; color: var(--text-muted); font-weight: 600; border-bottom: 2px solid var(--border); }
-    .num-input { width: 62px; padding: 5px 6px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; color: var(--accent); font-weight: 700; text-align: center; font-size: 0.85rem; }
+    .num-input { width: 56px; padding: 5px 6px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; color: var(--accent); font-weight: 700; text-align: center; font-size: 0.85rem; }
     .num-input:focus { border-color: var(--accent); outline: none; }
     .group-pill { background: var(--border); padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; color: var(--text-muted); }
     input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+    .route-select {
+      width: 105px;
+      padding: 5px 6px;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .route-select.active {
+      background: var(--purple);
+      border-color: var(--purple-hover);
+      color: #ffffff;
+      box-shadow: 0 0 10px rgba(139, 92, 246, 0.35);
+    }
     .backup-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 12px; border-top: 1px solid var(--border); margin-top: 16px; }
-    .info-list { margin: 10px 0 16px 18px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.6; }
-    .info-list li { margin-bottom: 6px; }
-    .info-list strong { color: var(--text); }
+    .onboarding-guide { background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-top: 14px; font-size: 0.85rem; line-height: 1.6; color: var(--text-muted); }
+    .onboarding-guide h3 { color: var(--accent); font-size: 0.95rem; margin-bottom: 8px; }
+    .onboarding-guide ul { margin-left: 20px; margin-bottom: 10px; }
+    .onboarding-guide code { color: var(--text); background: var(--card); padding: 2px 5px; border-radius: 4px; font-size: 0.8rem; }
   </style>
 </head>
 <body>
@@ -189,13 +268,13 @@ const uiTemplate = `<!DOCTYPE html>
         <button type="button" id="themeToggle" class="btn-secondary" onclick="toggleTheme()">☀️ Daytime Theme</button>
       </div>
       <p class="app-desc">
-        StreamTuner is a high-stability IPTV tuner proxy, stream-repair engine, and multi-region EPG aggregator. Use it to combine live M3U playlists from around the world, automatically organize station numbers by country, prevent stream drops during commercial breaks, and feed a unified broadcast lineup into Jellyfin, Plex, or Emby.
+        StreamTuner is a high-stability IPTV tuner proxy, stream-repair engine, and multi-region EPG aggregator. Combine live M3U playlists from around the world, organize station numbers by country, bypass geoblocks with Multi-VPN proxy routing, and feed a unified broadcast lineup into Jellyfin, Plex, or Emby.
       </p>
     </header>
 
     {{if .Saved}}
     <div class="toast" id="saveToast">
-      <span>✓ Changes saved! {{.ActiveCount}} stations are currently active and sent to your Media Server.</span>
+      <span>✓ Changes saved! {{.ActiveCount}} stations sent to Media Server ({{.VPNCount}} routed via VPN tunnels).</span>
       <button type="button" class="btn-secondary" style="padding: 3px 8px;" onclick="document.getElementById('saveToast').style.display='none'">Dismiss</button>
     </div>
     {{end}}
@@ -206,12 +285,16 @@ const uiTemplate = `<!DOCTYPE html>
         <div class="val">{{.Config.TunerCount}}</div>
       </div>
       <div class="stat-box">
-        <div class="label">Total Stations Found</div>
+        <div class="label">Stations Found</div>
         <div class="val">{{len .Channels}}</div>
       </div>
       <div class="stat-box">
-        <div class="label">Stations Sent to Media Server</div>
+        <div class="label">Sent to Media Server</div>
         <div class="val" id="liveActiveStat">{{.ActiveCount}}</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">VPN Routed (Purple)</div>
+        <div class="val purple" id="liveVPNStat">{{.VPNCount}}</div>
       </div>
     </div>
 
@@ -219,6 +302,7 @@ const uiTemplate = `<!DOCTYPE html>
       <input type="hidden" name="action_type" id="actionType" value="apply_channels">
       <input type="hidden" name="channel_state_json" id="channelStateJSON" value="">
 
+      <!-- Sources & General Config -->
       <div class="card">
         <h2>Configuration &amp; Sources</h2>
         <div class="form-group">
@@ -238,8 +322,8 @@ const uiTemplate = `<!DOCTYPE html>
           <textarea name="xmltv_urls" placeholder="https://example.com/epg.xml">{{.Config.XMLTVURLs}}</textarea>
         </div>
         <div class="form-group">
-          <label>Initial Playlist Keyword Filter (Optional — leave blank to control all stations with checkboxes below)</label>
-          <input type="text" name="filter_keywords" value="{{.Config.FilterKeywords}}" placeholder="Leave blank to manage stations using the Search &amp; Checkboxes below">
+          <label>Initial Playlist Keyword Filter (Optional — leave blank to control with checkboxes below)</label>
+          <input type="text" name="filter_keywords" value="{{.Config.FilterKeywords}}" placeholder="Leave blank to manage stations using Search &amp; Checkboxes below">
         </div>
         
         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
@@ -255,6 +339,33 @@ const uiTemplate = `<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Multi-VPN Profiles Gateway -->
+      <div class="card" style="border-left: 4px solid var(--purple);">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+          <h2>VPN &amp; Proxy Gateway (Multi-Country Profiles)</h2>
+          <span style="font-size: 0.8rem; color: var(--purple); font-weight: 700;">{{len .Profiles}} Profiles Configured</span>
+        </div>
+        <p style="color: var(--text-muted); font-size: 0.85rem; margin: 6px 0 12px 0;">
+          Define as many VPN proxy profiles as you need (e.g. USA, England, Japan). Assign any station to a profile below, and it will route through that tunnel in purple!
+        </p>
+
+        <div class="form-group">
+          <label>VPN Profiles (Format: <code>ID, Profile Name, Protocol (socks5/http), Host, Port, Username, Password</code>)</label>
+          <textarea name="vpn_profiles_text" style="min-height: 110px;" placeholder="usa, USA TorGuard, socks5, us.torguard.tg, 1080, myuser, mypassword&#10;uk, England TorGuard, socks5, uk.torguard.tg, 1080, myuser, mypassword&#10;gluetun, Local Gluetun, http, 192.168.0.29, 8888">{{.Config.VPNProfilesText}}</textarea>
+        </div>
+
+        <div class="onboarding-guide">
+          <h3>Multi-VPN Onboarding &amp; Setup Guide</h3>
+          <ul>
+            <li><strong>How Multi-VPN Routing Works:</strong> You can create multiple profiles above on separate lines. In the Live TV table below, each channel has a <em>Route</em> dropdown. Leave Australian stations on <code>Direct</code> (home connection), and assign geoblocked stations to <code>🔒 USA</code> or <code>🔒 England</code>.</li>
+            <li><strong>TorGuard Users:</strong> Use SOCKS5 port <code>1080</code> or <code>1085</code> with hostnames like <code>us.torguard.tg</code> or <code>uk.torguard.tg</code> and your proxy credentials.</li>
+            <li><strong>Private Internet Access (PIA) Users:</strong> Go to PIA Control Panel &gt; <em>Downloads</em> &gt; <em>VPN Settings</em> &gt; <em>SOCKS</em> &gt; <em>Generate</em>. Add: <code>pia_nl, PIA Netherlands, socks5, proxy-nl.privateinternetaccess.com, 1080, x1234567, password</code>.</li>
+            <li><strong>Gluetun / Local Containers:</strong> Add <code>gluetun, Local Gluetun, http, YOUR-SERVER-IP, 8888</code> (leave username/password empty).</li>
+          </ul>
+        </div>
+      </div>
+`
+const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
       <div class="card">
         <div class="table-actions">
           <h2>Live TV Channels ({{len .Channels}})</h2>
@@ -280,6 +391,7 @@ const uiTemplate = `<!DOCTYPE html>
             <option value="ALL">All Stations</option>
             <option value="ACTIVE">Selected Only (Active)</option>
             <option value="INACTIVE">Unselected Only</option>
+            <option value="VPN">VPN Routed Only (Purple)</option>
           </select>
         </div>
 
@@ -293,7 +405,8 @@ const uiTemplate = `<!DOCTYPE html>
             <thead>
               <tr>
                 <th style="width: 40px; text-align: center;">Active</th>
-                <th style="width: 72px;">#</th>
+                <th style="width: 110px;">Route</th>
+                <th style="width: 65px;">#</th>
                 <th>Channel Name</th>
                 <th>Region</th>
                 <th>EPG ID</th>
@@ -305,6 +418,15 @@ const uiTemplate = `<!DOCTYPE html>
               <tr class="ch-row" data-key="{{.Key}}" data-url="{{.URL}}" data-name="{{.GuideName}}" data-group="{{.Group}}" data-epg="{{.TvgID}}">
                 <td style="text-align: center;">
                   <input type="checkbox" class="ch-cb" value="{{.Key}}" {{if .Enabled}}checked{{end}} onchange="updateLiveCount()">
+                </td>
+                <td>
+                  <select class="route-select {{if and .Route (ne .Route "direct")}}active{{end}}" onchange="updateLiveCount(); styleRouteSelect(this);">
+                    <option value="direct">Direct</option>
+                    {{$curr := .Route}}
+                    {{range $.Profiles}}
+                    <option value="{{.ID}}" {{if eq $curr .ID}}selected{{end}}>🔒 {{.Name}}</option>
+                    {{end}}
+                  </select>
                 </td>
                 <td>
                   <input type="text" class="num-input ch-num-input" value="{{.GuideNumber}}" onkeydown="if(event.key==='Enter'){event.preventDefault();}">
@@ -328,6 +450,7 @@ const uiTemplate = `<!DOCTYPE html>
       <input type="file" id="importFile" name="config_file" accept=".json" onchange="document.getElementById('importForm').submit()">
     </form>
 
+    <!-- Optional M3U Mode Settings -->
     <div class="card" style="border-left: 4px solid var(--accent);">
       <h2>Optional Settings</h2>
       <p style="color: var(--text); font-size: 0.95rem; font-weight: 500; line-height: 1.5; margin-bottom: 10px;">
@@ -336,25 +459,41 @@ const uiTemplate = `<!DOCTYPE html>
       <p style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.5;">
         <strong>What this section does:</strong> By default, StreamTuner emulates a hardware HDHomeRun tuner. While HDHomeRun is plug-and-play, the HDHomeRun specification does not support category folders—so every station is placed into a single list. StreamTuner also generates a dedicated <strong>M3U Playlist endpoint</strong> that embeds regional category tags (<code>group-title</code>) alongside your repaired video streams.
       </p>
-      <ul class="info-list">
+      <ul class="info-list" style="margin: 10px 0 16px 18px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.6;">
         <li><strong>For Jellyfin / Emby Users:</strong> Instead of adding StreamTuner as an HDHomeRun device, you can add it as an <strong>M3U Tuner</strong> using the links on the next screen. Jellyfin will automatically read the embedded country tags and display filterable category tabs at the top of your Live TV guide.</li>
         <li><strong>For Plex Users:</strong> Plex DVR only accepts HDHomeRun connections and does not natively support M3U URLs or category tabs. Plex users should remain in standard HDHomeRun mode, where StreamTuner automatically separates countries by channel number blocks (1–99 for Australia, 1000+ for US, 2000+ for Canada, 3000+ for Japan).</li>
       </ul>
       <a href="/m3u-mode" class="btn btn-secondary">Open M3U Category Setup &amp; Endpoints &rarr;</a>
     </div>
   </div>
+`
+const uiTemplateScript = `  <script>
+    function styleRouteSelect(sel) {
+      if (sel.value && sel.value !== 'direct') {
+        sel.classList.add('active');
+      } else {
+        sel.classList.remove('active');
+      }
+    }
 
-    <script>
     function updateLiveCount() {
       const allCbs = document.querySelectorAll('.ch-cb');
       let active = 0;
       allCbs.forEach(cb => {
         if (cb.checked) active++;
       });
+      const allRoutes = document.querySelectorAll('.route-select');
+      let vpnCount = 0;
+      allRoutes.forEach(sel => {
+        if (sel.value && sel.value !== 'direct') vpnCount++;
+      });
+
       const statEl = document.getElementById('liveActiveStat');
       const btnEl = document.getElementById('btnActiveCount');
+      const vpnStatEl = document.getElementById('liveVPNStat');
       if (statEl) statEl.textContent = active;
       if (btnEl) btnEl.textContent = active;
+      if (vpnStatEl) vpnStatEl.textContent = vpnCount;
     }
 
     function toggleVisible(status) {
@@ -389,10 +528,15 @@ const uiTemplate = `<!DOCTYPE html>
         const num = numInput ? numInput.value.toLowerCase() : '';
         const cb = row.querySelector('.ch-cb');
         const isChecked = cb ? cb.checked : false;
+        const routeSel = row.querySelector('.route-select');
+        const isVPN = routeSel ? (routeSel.value && routeSel.value !== 'direct') : false;
 
         const matchesQuery = !query || name.includes(query) || num.includes(query) || group.toLowerCase().includes(query) || epg.includes(query);
         const matchesRegion = (region === 'ALL') || (group === region);
-        const matchesStatus = (status === 'ALL') || (status === 'ACTIVE' && isChecked) || (status === 'INACTIVE' && !isChecked);
+        let matchesStatus = true;
+        if (status === 'ACTIVE') matchesStatus = isChecked;
+        else if (status === 'INACTIVE') matchesStatus = !isChecked;
+        else if (status === 'VPN') matchesStatus = isVPN;
 
         if (matchesQuery && matchesRegion && matchesStatus) {
           row.style.display = '';
@@ -425,12 +569,14 @@ const uiTemplate = `<!DOCTYPE html>
         const key = row.getAttribute('data-key') || '';
         const url = row.getAttribute('data-url') || '';
         const cb = row.querySelector('.ch-cb');
+        const routeSel = row.querySelector('.route-select');
         const numInput = row.querySelector('.ch-num-input');
         state.push({
           key: key,
           url: url,
           num: numInput ? numInput.value.trim() : '',
-          enabled: cb ? cb.checked : false
+          enabled: cb ? cb.checked : false,
+          route: routeSel ? routeSel.value : 'direct'
         });
       });
       const hiddenInput = document.getElementById('channelStateJSON');
@@ -551,7 +697,7 @@ const m3uModeTemplate = `<!DOCTYPE html>
   </div>
 </body>
 </html>`
-
+var uiTemplate = uiTemplateHead + uiTemplateTable + uiTemplateScript
 func getPlaylistMeta(url string, index int) (tag string, group string, baseOffset int) {
 	u := strings.ToLower(url)
 	if strings.Contains(u, "/au/") || strings.Contains(u, "australia") || strings.Contains(u, "raw-tv") {
@@ -643,6 +789,7 @@ func fetchAndParseM3U(url string, tag string, group string, baseOffset int) ([]C
 				TvgID:       currentTvgID,
 				Group:       currentGroup,
 				Enabled:     true,
+				Route:       "direct",
 			})
 			chCounter++
 		} else if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
@@ -690,6 +837,7 @@ func parseCustomChannels(text string) []Channel {
 				TvgID:       tvgID,
 				Group:       "Australia",
 				Enabled:     true,
+				Route:       "direct",
 			})
 		}
 	}
@@ -747,6 +895,15 @@ func applySavedChannelState(list []Channel) {
 			list[i].Enabled = matchesFilter(list[i].GuideName, appConfig.FilterKeywords)
 		} else {
 			list[i].Enabled = true
+		}
+
+		list[i].Route = "direct"
+		if appConfig.ChannelRoutes != nil {
+			if r, ok := appConfig.ChannelRoutes[k]; ok && r != "" {
+				list[i].Route = r
+			} else if r, ok := appConfig.ChannelRoutes[u]; ok && r != "" {
+				list[i].Route = r
+			}
 		}
 	}
 }
@@ -945,7 +1102,6 @@ func refreshEPG() {
 	os.Rename(tmpFile, epgPath)
 	log.Printf("EPG aggregation complete: saved to %s", epgPath)
 }
-
 func loadConfig() {
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
@@ -965,6 +1121,9 @@ func loadConfig() {
 		EnabledChannels:  make(map[string]bool),
 		DisabledChannels: make(map[string]bool),
 		CustomNumbers:    make(map[string]string),
+		VPNProfilesText:  "",
+		VPNProfiles:      []VPNProfile{},
+		ChannelRoutes:    make(map[string]string),
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -986,6 +1145,12 @@ func loadConfig() {
 	}
 	if appConfig.CustomNumbers == nil {
 		appConfig.CustomNumbers = make(map[string]string)
+	}
+	if appConfig.ChannelRoutes == nil {
+		appConfig.ChannelRoutes = make(map[string]string)
+	}
+	if appConfig.VPNProfilesText != "" {
+		appConfig.VPNProfiles = parseVPNProfiles(appConfig.VPNProfilesText)
 	}
 
 	loadAllChannels()
@@ -1037,22 +1202,30 @@ func main() {
 		tmpl, _ := template.New("ui").Parse(uiTemplate)
 		configLock.RLock()
 		active := 0
+		vpnActive := 0
 		for _, c := range channels {
 			if c.Enabled {
 				active++
+			}
+			if c.Route != "" && c.Route != "direct" {
+				vpnActive++
 			}
 		}
 		data := struct {
 			Version     string
 			Config      Config
 			Channels    []Channel
+			Profiles    []VPNProfile
 			ActiveCount int
+			VPNCount    int
 			Saved       bool
 		}{
 			Version:     appVersion,
 			Config:      appConfig,
 			Channels:    channels,
+			Profiles:    appConfig.VPNProfiles,
 			ActiveCount: active,
+			VPNCount:    vpnActive,
 			Saved:       r.URL.Query().Get("saved") == "1",
 		}
 		configLock.RUnlock()
@@ -1107,6 +1280,9 @@ func main() {
 				}
 				configLock.Lock()
 				appConfig = newCfg
+				if appConfig.VPNProfilesText != "" {
+					appConfig.VPNProfiles = parseVPNProfiles(appConfig.VPNProfilesText)
+				}
 				loadAllChannels()
 				cfgCopy := appConfig
 				configLock.Unlock()
@@ -1140,6 +1316,7 @@ func main() {
 
 		newEnabled := make(map[string]bool)
 		newDisabled := make(map[string]bool)
+		newRoutes := make(map[string]string)
 		newCustomNumbers := make(map[string]string)
 
 		if appConfig.CustomNumbers != nil {
@@ -1170,11 +1347,18 @@ func main() {
 						newDisabled[u.URL] = true
 					}
 				}
+				if u.Route != "" {
+					newRoutes[u.Key] = u.Route
+					if u.URL != "" {
+						newRoutes[u.URL] = u.Route
+					}
+				}
 			}
 
 			for i := range channels {
 				if u, ok := updateMap[channels[i].Key]; ok {
 					channels[i].Enabled = u.Enabled
+					channels[i].Route = u.Route
 					if u.Num != "" {
 						channels[i].GuideNumber = u.Num
 					}
@@ -1189,13 +1373,16 @@ func main() {
 					newDisabled[c.Key] = true
 					newDisabled[c.URL] = true
 				}
+				newRoutes[c.Key] = c.Route
+				newRoutes[c.URL] = c.Route
 			}
 		}
 
 		newM3U := strings.TrimSpace(r.FormValue("m3u_urls"))
 		newCustom := strings.TrimSpace(r.FormValue("custom_channels"))
 		newFilter := strings.TrimSpace(r.FormValue("filter_keywords"))
-		sourcesChanged := (newM3U != appConfig.M3UURLs) || (newCustom != appConfig.CustomChannels) || (newFilter != appConfig.FilterKeywords)
+		newVPNText := strings.TrimSpace(r.FormValue("vpn_profiles_text"))
+		sourcesChanged := (newM3U != appConfig.M3UURLs) || (newCustom != appConfig.CustomChannels) || (newFilter != appConfig.FilterKeywords) || (newVPNText != appConfig.VPNProfilesText)
 
 		appConfig.FriendlyName = "StreamTuner"
 		appConfig.TunerCount = tCount
@@ -1206,6 +1393,9 @@ func main() {
 		appConfig.EnabledChannels = newEnabled
 		appConfig.DisabledChannels = newDisabled
 		appConfig.CustomNumbers = newCustomNumbers
+		appConfig.VPNProfilesText = newVPNText
+		appConfig.VPNProfiles = parseVPNProfiles(newVPNText)
+		appConfig.ChannelRoutes = newRoutes
 
 		if actionType == "reload_feeds" || sourcesChanged || len(channels) == 0 {
 			loadAllChannels()
@@ -1314,16 +1504,30 @@ func main() {
 		json.NewEncoder(w).Encode(lineup)
 	})
 
-	// Stream Proxy
+	// Multi-VPN Live Stream Proxy
 	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
 		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
 		var targetURL string
+		routeID := "direct"
 
 		configLock.RLock()
 		for _, c := range channels {
 			if c.GuideNumber == chNum {
 				targetURL = c.URL
+				if c.Route != "" {
+					routeID = c.Route
+				}
 				break
+			}
+		}
+
+		var matchedProfile *VPNProfile
+		if routeID != "" && routeID != "direct" {
+			for _, p := range appConfig.VPNProfiles {
+				if p.ID == routeID {
+					matchedProfile = &p
+					break
+				}
 			}
 		}
 		configLock.RUnlock()
@@ -1333,17 +1537,42 @@ func main() {
 			return
 		}
 
-		log.Printf("Streaming channel %s from %s", chNum, targetURL)
+		var proxyURL string
+		if matchedProfile != nil && matchedProfile.Host != "" && matchedProfile.Port != "" {
+			auth := ""
+			if matchedProfile.Username != "" {
+				if matchedProfile.Password != "" {
+					auth = url.QueryEscape(matchedProfile.Username) + ":" + url.QueryEscape(matchedProfile.Password) + "@"
+				} else {
+					auth = url.QueryEscape(matchedProfile.Username) + "@"
+				}
+			}
+			proto := matchedProfile.Type
+			if proto == "" {
+				proto = "socks5"
+			}
+			proxyURL = fmt.Sprintf("%s://%s%s:%s", proto, auth, matchedProfile.Host, matchedProfile.Port)
+			log.Printf("Streaming channel %s via VPN Profile '%s' (%s)", chNum, matchedProfile.Name, proxyURL)
+		} else {
+			log.Printf("Streaming channel %s directly (Direct Connection)", chNum)
+		}
 
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "ffmpeg",
+		ffmpegArgs := []string{
 			"-hide_banner",
 			"-loglevel", "warning",
 			"-probesize", "1000000",
 			"-analyzeduration", "1000000",
 			"-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+		}
+
+		if proxyURL != "" && (strings.HasPrefix(proxyURL, "http://") || strings.HasPrefix(proxyURL, "https://")) {
+			ffmpegArgs = append(ffmpegArgs, "-http_proxy", proxyURL)
+		}
+
+		ffmpegArgs = append(ffmpegArgs,
 			"-i", targetURL,
 			"-c", "copy",
 			"-f", "mpegts",
@@ -1351,7 +1580,19 @@ func main() {
 			"pipe:1",
 		)
 
+		cmd := exec.CommandContext(ctx, "ffmpeg", ffmpegArgs...)
 		cmd.Stderr = os.Stderr
+
+		if proxyURL != "" {
+			cmd.Env = append(os.Environ(),
+				"all_proxy="+proxyURL,
+				"ALL_PROXY="+proxyURL,
+				"http_proxy="+proxyURL,
+				"HTTP_PROXY="+proxyURL,
+				"https_proxy="+proxyURL,
+				"HTTPS_PROXY="+proxyURL,
+			)
+		}
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
