@@ -357,7 +357,7 @@ const uiTemplateHead = `<!DOCTYPE html>
         <div class="onboarding-guide">
           <h3>Multi-VPN Onboarding &amp; Setup Guide</h3>
           <ul>
-            <li><strong>How Multi-VPN Routing Works:</strong> You can create multiple profiles above on separate lines. In the Live TV table below, each channel has a <em>Route</em> dropdown. Leave Australian stations on <code>Direct</code> (home connection), and assign geoblocked stations to <code>🔒 USA</code> or <code>🔒 England</code>.</li>
+            <li><strong>How Multi-VPN Routing Works:</strong> You can create multiple profiles above on separate lines. In the Live TV table below, each channel has a <em>Route</em> dropdown. Leave your local stations on <code>Direct</code> (home connection), and assign geoblocked stations to <code>🔒 COUNTRY-A</code> or <code>🔒 COUNTRY-B</code>.</li>
             <li><strong>TorGuard Users:</strong> Use SOCKS5 port <code>1080</code> or <code>1085</code> with hostnames like <code>us.torguard.tg</code> or <code>uk.torguard.tg</code> and your proxy credentials.</li>
             <li><strong>Private Internet Access (PIA) Users:</strong> Go to PIA Control Panel &gt; <em>Downloads</em> &gt; <em>VPN Settings</em> &gt; <em>SOCKS</em> &gt; <em>Generate</em>. Add: <code>pia_nl, PIA Netherlands, socks5, proxy-nl.privateinternetaccess.com, 1080, x1234567, password</code>.</li>
             <li><strong>Gluetun / Local Containers:</strong> Add <code>gluetun, Local Gluetun, http, YOUR-SERVER-IP, 8888</code> (leave username/password empty).</li>
