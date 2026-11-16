@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -23,12 +24,12 @@ import (
 	"time"
 )
 
-var appVersion = "v2.0.0"
+var appVersion = "v2.2.0"
 
 type VPNProfile struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Type     string `json:"type"` // socks5 or http
+	Type     string `json:"type"`
 	Host     string `json:"host"`
 	Port     string `json:"port"`
 	Username string `json:"username"`
@@ -49,6 +50,9 @@ type Config struct {
 	VPNProfilesText  string            `json:"vpn_profiles_text"`
 	VPNProfiles      []VPNProfile      `json:"vpn_profiles"`
 	ChannelRoutes    map[string]string `json:"channel_routes"`
+	CustomGroupsText string            `json:"custom_groups_text"`
+	CustomGroups     []string          `json:"custom_groups"`
+	ChannelGroups    map[string]string `json:"channel_groups"`
 }
 
 type Channel struct {
@@ -59,16 +63,41 @@ type Channel struct {
 	Logo        string `json:"Logo,omitempty"`
 	TvgID       string `json:"TvgID,omitempty"`
 	Group       string `json:"Group,omitempty"`
+	UserGroup   string `json:"UserGroup,omitempty"`
 	Enabled     bool   `json:"Enabled"`
 	Route       string `json:"Route"`
 }
 
 type ChannelStateUpdate struct {
-	Key     string `json:"key"`
-	URL     string `json:"url"`
-	Num     string `json:"num"`
-	Enabled bool   `json:"enabled"`
-	Route   string `json:"route"`
+	Key       string `json:"key"`
+	URL       string `json:"url"`
+	Num       string `json:"num"`
+	Enabled   bool   `json:"enabled"`
+	Route     string `json:"route"`
+	UserGroup string `json:"user_group"`
+}
+
+type StreamCheckRequest struct {
+	URL   string `json:"url"`
+	Route string `json:"route"`
+}
+
+type StreamCheckResponse struct {
+	Status   string `json:"status"`
+	HasVideo bool   `json:"has_video"`
+	HasAudio bool   `json:"has_audio"`
+	Detail   string `json:"detail"`
+}
+
+type YouTubeSearchRequest struct {
+	Query string `json:"query"`
+}
+
+type YouTubeSearchResult struct {
+	Title       string `json:"title"`
+	Channel     string `json:"channel"`
+	URL         string `json:"url"`
+	IsPermanent bool   `json:"is_permanent"`
 }
 
 type DeviceInfo struct {
@@ -110,6 +139,24 @@ func makeChannelKey(name, streamURL string) string {
 	return strings.TrimSpace(name) + "|" + strings.TrimSpace(streamURL)
 }
 
+func parseCustomGroups(text string) []string {
+	var groups []string
+	seen := make(map[string]bool)
+	parts := strings.Split(text, ",")
+	for _, p := range parts {
+		clean := strings.TrimSpace(p)
+		if clean == "" || strings.EqualFold(clean, "none") {
+			continue
+		}
+		lower := strings.ToLower(clean)
+		if !seen[lower] {
+			seen[lower] = true
+			groups = append(groups, clean)
+		}
+	}
+	return groups
+}
+
 func parseVPNProfiles(text string) []VPNProfile {
 	var list []VPNProfile
 	lines := strings.Split(text, "\n")
@@ -149,6 +196,66 @@ func parseVPNProfiles(text string) []VPNProfile {
 	}
 	return list
 }
+
+func getProxyURLForRoute(routeID string) string {
+	if routeID == "" || routeID == "direct" {
+		return ""
+	}
+	configLock.RLock()
+	defer configLock.RUnlock()
+	for _, p := range appConfig.VPNProfiles {
+		if p.ID == routeID && p.Host != "" && p.Port != "" {
+			auth := ""
+			if p.Username != "" {
+				if p.Password != "" {
+					auth = url.QueryEscape(p.Username) + ":" + url.QueryEscape(p.Password) + "@"
+				} else {
+					auth = url.QueryEscape(p.Username) + "@"
+				}
+			}
+			proto := p.Type
+			if proto == "" {
+				proto = "socks5"
+			}
+			return fmt.Sprintf("%s://%s%s:%s", proto, auth, p.Host, p.Port)
+		}
+	}
+	return ""
+}
+
+func isYouTubeURL(rawURL string) bool {
+	u := strings.ToLower(rawURL)
+	return strings.Contains(u, "youtube.com/") || strings.Contains(u, "youtu.be/")
+}
+
+func resolveStreamURL(rawURL string, proxyURL string) (string, error) {
+	if !isYouTubeURL(rawURL) {
+		return rawURL, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	args := []string{"-g", "--no-warnings", "--no-playlist", "-f", "best[ext=mp4]/best"}
+	if proxyURL != "" {
+		args = append(args, "--proxy", proxyURL)
+	}
+	args = append(args, rawURL)
+
+	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+			return trimmed, nil
+		}
+	}
+	return "", fmt.Errorf("no playable stream URL returned by yt-dlp")
+}
 const uiTemplateHead = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -176,6 +283,7 @@ const uiTemplateHead = `<!DOCTYPE html>
       --purple-hover: #7c3aed;
       --success-bg: rgba(16, 185, 129, 0.15);
       --success-border: #10b981;
+      --danger: #ef4444;
     }
     html[data-theme="light"] {
       --bg: #f1f5f9;
@@ -194,14 +302,14 @@ const uiTemplateHead = `<!DOCTYPE html>
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 16px; display: flex; justify-content: center; transition: background 0.2s, color 0.2s; }
-    .container { width: 100%; max-width: 990px; }
+    .container { width: 100%; max-width: 1080px; }
     header { margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
     .header-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
     .logo-group { display: flex; align-items: center; gap: 10px; }
     .logo-group h1 { font-size: 1.5rem; color: var(--accent); }
     .badge { background: var(--border); color: var(--accent); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
     .app-desc { color: var(--text-muted); font-size: 0.9rem; line-height: 1.5; }
-    .toast { background: var(--success-bg); border: 1px solid var(--success-border); color: var(--text); padding: 12px 16px; border-radius: 10px; margin-bottom: 18px; font-size: 0.9rem; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
+    .toast { background: var(--success-bg); border: 1px solid var(--success-border); color: var(--text); padding: 14px 16px; border-radius: 10px; margin-bottom: 18px; font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
     .card h2 { font-size: 1.15rem; margin-bottom: 14px; color: var(--text); }
     .form-group { margin-bottom: 14px; }
@@ -213,28 +321,30 @@ const uiTemplateHead = `<!DOCTYPE html>
     .btn:hover { background: var(--accent-hover); }
     .btn-secondary { background: var(--border); color: var(--text); font-weight: 600; padding: 7px 12px; font-size: 0.8rem; border-radius: 6px; text-decoration: none; cursor: pointer; border: 1px solid var(--border); }
     .btn-secondary:hover { border-color: var(--accent); }
+    .btn-danger { background: rgba(239, 68, 68, 0.18); color: #fca5a5; border: 1px solid var(--danger); font-weight: 700; padding: 7px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer; }
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
     .stat-box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; text-align: center; }
     .stat-box .label { font-size: 0.8rem; color: var(--text-muted); font-weight: 500; }
     .stat-box .val { font-size: 1.6rem; font-weight: 700; color: var(--accent); margin-top: 4px; }
     .stat-box .val.purple { color: var(--purple); }
     .table-actions { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
-    .search-bar { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; margin-bottom: 12px; }
-    @media (max-width: 640px) {
+    .search-bar { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; margin-bottom: 12px; }
+    @media (max-width: 720px) {
       .search-bar { grid-template-columns: 1fr; }
     }
     .search-meta { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
-    .table-container { max-height: 480px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--input-bg); }
-    .channel-table { width: 100%; border-collapse: collapse; }
+    .table-container { max-height: 500px; overflow-x: auto; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--input-bg); }
+    .channel-table { width: 100%; border-collapse: collapse; min-width: 720px; }
     .channel-table th, .channel-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
     .channel-table th { position: sticky; top: 0; background: var(--card); z-index: 2; color: var(--text-muted); font-weight: 600; border-bottom: 2px solid var(--border); }
-    .num-input { width: 56px; padding: 5px 6px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; color: var(--accent); font-weight: 700; text-align: center; font-size: 0.85rem; }
+    .num-input { min-width: 64px; width: 64px; padding: 6px 4px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--accent); font-weight: 700; text-align: center; font-size: 0.85rem; }
     .num-input:focus { border-color: var(--accent); outline: none; }
     .group-pill { background: var(--border); padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; color: var(--text-muted); }
     input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
-    .route-select {
-      width: 105px;
-      padding: 5px 6px;
+    .route-select, .group-select {
+      min-width: 106px;
+      width: 106px;
+      padding: 6px 6px;
       background: var(--input-bg);
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -250,6 +360,22 @@ const uiTemplateHead = `<!DOCTYPE html>
       color: #ffffff;
       box-shadow: 0 0 10px rgba(139, 92, 246, 0.35);
     }
+    .group-select.assigned {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .yt-box { background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+    .yt-search-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .yt-results { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .yt-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; flex-wrap: wrap; }
+    .health-panel { background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 14px; display: none; }
+    .progress-track { width: 100%; height: 10px; background: var(--border); border-radius: 999px; overflow: hidden; margin: 10px 0; }
+    .progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.25s ease; }
+    .status-pill { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; margin-left: 6px; }
+    .status-testing { background: rgba(0, 210, 196, 0.15); color: var(--accent); }
+    .status-ok { background: rgba(16, 185, 129, 0.18); color: #34d399; }
+    .status-noaudio { background: rgba(245, 158, 11, 0.18); color: #fbbf24; }
+    .status-dead { background: rgba(239, 68, 68, 0.18); color: #f87171; }
     .backup-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 12px; border-top: 1px solid var(--border); margin-top: 16px; }
     .onboarding-guide { background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-top: 14px; font-size: 0.85rem; line-height: 1.6; color: var(--text-muted); }
     .onboarding-guide h3 { color: var(--accent); font-size: 0.95rem; margin-bottom: 8px; }
@@ -268,14 +394,20 @@ const uiTemplateHead = `<!DOCTYPE html>
         <button type="button" id="themeToggle" class="btn-secondary" onclick="toggleTheme()">☀️ Daytime Theme</button>
       </div>
       <p class="app-desc">
-        StreamTuner is a high-stability IPTV tuner proxy, stream-repair engine, and multi-region EPG aggregator. Combine live M3U playlists from around the world, organize station numbers by country, bypass geoblocks with Multi-VPN proxy routing, and feed a unified broadcast lineup into Jellyfin, Plex, or Emby.
+        StreamTuner is a high-stability IPTV tuner proxy, stream-repair engine, and multi-region EPG aggregator. Combine live M3U playlists and YouTube Live broadcasts, organize station numbers and Jellyfin channel groups, bypass geoblocks with Multi-VPN proxy routing, verify audio/video health, and feed a unified lineup into Jellyfin, Plex, or Emby.
       </p>
     </header>
 
     {{if .Saved}}
     <div class="toast" id="saveToast">
-      <span>✓ Changes saved! {{.ActiveCount}} stations sent to Media Server ({{.VPNCount}} routed via VPN tunnels).</span>
-      <button type="button" class="btn-secondary" style="padding: 3px 8px;" onclick="document.getElementById('saveToast').style.display='none'">Dismiss</button>
+      <div>
+        <strong>✓ Changes saved!</strong> {{.ActiveCount}} stations active ({{.VPNCount}} via VPN).
+        <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 3px;">Would you like to test all {{.ActiveCount}} selected channels for working Video &amp; Audio now?</div>
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <button type="button" class="btn" style="padding: 7px 14px; font-size: 0.82rem;" onclick="document.getElementById('saveToast').style.display='none'; runHealthCheck();">🔍 Test All Active Channels Now</button>
+        <button type="button" class="btn-secondary" onclick="document.getElementById('saveToast').style.display='none'">Not Now</button>
+      </div>
     </div>
     {{end}}
 
@@ -313,9 +445,23 @@ const uiTemplateHead = `<!DOCTYPE html>
           <label>M3U / M3U8 Playlist URLs (One URL per line — Auto-tagged by country)</label>
           <textarea name="m3u_urls" placeholder="https://example.com/au.m3u8&#10;https://example.com/us.m3u">{{.Config.M3UURLs}}</textarea>
         </div>
+
+        <!-- YouTube Live Channel Search -->
+        <div class="yt-box">
+          <label style="color: var(--accent); font-weight: 700; margin-bottom: 6px;">📺 Search &amp; Add YouTube Live Channels</label>
+          <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px;">
+            Searches YouTube for live broadcasts and adds the channel's permanent <code>/live</code> URL so it keeps working even if the broadcaster restarts their stream.
+          </div>
+          <div class="yt-search-row">
+            <input type="text" id="ytSearchInput" style="flex: 1; min-width: 200px;" placeholder="e.g. ABC News Australia, Sky News, NASA Live..." onkeydown="if(event.key==='Enter'){event.preventDefault(); searchYouTubeLive();}">
+            <button type="button" class="btn-secondary" id="ytSearchBtn" onclick="searchYouTubeLive()">Search YouTube Live</button>
+          </div>
+          <div id="ytResultsContainer" class="yt-results"></div>
+        </div>
+
         <div class="form-group">
-          <label>Custom Direct Channels (Format: Number, Name, Stream URL, EPG_ID)</label>
-          <textarea name="custom_channels" placeholder="9, Channel 9 HD, https://9now...m3u8, mjh-channel-9-nsw">{{.Config.CustomChannels}}</textarea>
+          <label>Custom Direct Channels &amp; YouTube Live URLs (Format: Number, Name, Stream or YouTube URL, EPG_ID)</label>
+          <textarea id="customChannelsTextarea" name="custom_channels" placeholder="9, Channel 9 HD, https://9now...m3u8, mjh-channel-9-nsw&#10;99, ABC News YouTube Live, https://www.youtube.com/@ABCNewsAustralia/live, mjh-abc-news">{{.Config.CustomChannels}}</textarea>
         </div>
         <div class="form-group">
           <label>XMLTV EPG URLs (One URL per line — supports .xml and .xml.gz)</label>
@@ -346,21 +492,20 @@ const uiTemplateHead = `<!DOCTYPE html>
           <span style="font-size: 0.8rem; color: var(--purple); font-weight: 700;">{{len .Profiles}} Profiles Configured</span>
         </div>
         <p style="color: var(--text-muted); font-size: 0.85rem; margin: 6px 0 12px 0;">
-          Define as many VPN proxy profiles as you need (e.g. USA, England, Japan). Assign any station to a profile below, and it will route through that tunnel in purple!
+          Define separate VPN proxy profiles (e.g. USA, England, Japan). Assign any station to a profile below, and it will route through that tunnel in purple!
         </p>
 
         <div class="form-group">
           <label>VPN Profiles (Format: <code>ID, Profile Name, Protocol (socks5/http), Host, Port, Username, Password</code>)</label>
-          <textarea name="vpn_profiles_text" style="min-height: 110px;" placeholder="usa, USA TorGuard, socks5, us.torguard.tg, 1080, myuser, mypassword&#10;uk, England TorGuard, socks5, uk.torguard.tg, 1080, myuser, mypassword&#10;gluetun, Local Gluetun, http, 192.168.0.29, 8888">{{.Config.VPNProfilesText}}</textarea>
+          <textarea name="vpn_profiles_text" style="min-height: 110px;" placeholder="usa, USA TorGuard, socks5, us.torguard.tg, 1080, myuser, mypassword&#10;uk, England TorGuard, socks5, uk.torguard.tg, 1080, myuser, mypassword">{{.Config.VPNProfilesText}}</textarea>
         </div>
 
         <div class="onboarding-guide">
           <h3>Multi-VPN Onboarding &amp; Setup Guide</h3>
           <ul>
-            <li><strong>How Multi-VPN Routing Works:</strong> You can create multiple profiles above on separate lines. In the Live TV table below, each channel has a <em>Route</em> dropdown. Leave your local stations on <code>Direct</code> (home connection), and assign geoblocked stations to <code>🔒 COUNTRY-A</code> or <code>🔒 COUNTRY-B</code>.</li>
             <li><strong>TorGuard Users:</strong> Use SOCKS5 port <code>1080</code> or <code>1085</code> with hostnames like <code>us.torguard.tg</code> or <code>uk.torguard.tg</code> and your proxy credentials.</li>
-            <li><strong>Private Internet Access (PIA) Users:</strong> Go to PIA Control Panel &gt; <em>Downloads</em> &gt; <em>VPN Settings</em> &gt; <em>SOCKS</em> &gt; <em>Generate</em>. Add: <code>pia_nl, PIA Netherlands, socks5, proxy-nl.privateinternetaccess.com, 1080, x1234567, password</code>.</li>
-            <li><strong>Gluetun / Local Containers:</strong> Add <code>gluetun, Local Gluetun, http, YOUR-SERVER-IP, 8888</code> (leave username/password empty).</li>
+            <li><strong>Private Internet Access (PIA) Users:</strong> Generate SOCKS credentials in the PIA Control Panel and add: <code>pia_nl, PIA Netherlands, socks5, proxy-nl.privateinternetaccess.com, 1080, x1234567, password</code>.</li>
+            <li><strong>Gluetun / Local Containers:</strong> Add <code>gluetun, Local Gluetun, http, YOUR-SERVER-IP, 8888</code> (leave username/password blank).</li>
           </ul>
         </div>
       </div>
@@ -370,10 +515,26 @@ const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
         <div class="table-actions">
           <h2>Live TV Channels ({{len .Channels}})</h2>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="button" class="btn-secondary" onclick="runHealthCheck()">🔍 Test Audio/Video</button>
             <button type="button" class="btn-secondary" onclick="toggleVisible(true)">Select Visible</button>
             <button type="button" class="btn-secondary" onclick="toggleVisible(false)">Deselect Visible</button>
             <button type="submit" class="btn" style="padding: 7px 14px; font-size: 0.85rem;" onclick="document.getElementById('actionType').value='apply_channels'">Apply Changes (<span id="btnActiveCount">{{.ActiveCount}}</span>)</button>
           </div>
+        </div>
+
+        <!-- Stream Health Progress Panel -->
+        <div class="health-panel" id="healthPanel">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <strong id="healthStatusTitle" style="font-size: 0.9rem; color: var(--accent);">Checking streams...</strong>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button type="button" class="btn-danger" id="btnDisableFailed" style="display: none;" onclick="disableFailedChannels()">Uncheck Broken &amp; No-Audio (<span id="failedCountSpan">0</span>)</button>
+              <button type="button" class="btn-secondary" id="btnStopCheck" onclick="stopHealthCheck()">Stop Test</button>
+            </div>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="healthProgressBar"></div>
+          </div>
+          <div id="healthSummaryText" style="font-size: 0.8rem; color: var(--text-muted);">Initializing stream probe...</div>
         </div>
 
         {{if .Channels}}
@@ -386,6 +547,14 @@ const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
             <option value="Canada">Canada</option>
             <option value="Japan">Japan</option>
             <option value="United Kingdom">United Kingdom</option>
+            <option value="YouTube Live">YouTube Live</option>
+          </select>
+          <select id="userGroupFilter" onchange="filterTable()">
+            <option value="ALL">All Jellyfin Groups</option>
+            <option value="None">None (Unassigned)</option>
+            {{range .UserGroups}}
+            <option value="{{.}}">{{.}}</option>
+            {{end}}
           </select>
           <select id="statusFilter" onchange="filterTable()">
             <option value="ALL">All Stations</option>
@@ -404,9 +573,10 @@ const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
           <table class="channel-table">
             <thead>
               <tr>
-                <th style="width: 40px; text-align: center;">Active</th>
-                <th style="width: 110px;">Route</th>
-                <th style="width: 65px;">#</th>
+                <th style="width: 44px; text-align: center;">Active</th>
+                <th style="width: 112px;">Route</th>
+                <th style="width: 72px;">Ch #</th>
+                <th style="width: 120px;">Group</th>
                 <th>Channel Name</th>
                 <th>Region</th>
                 <th>EPG ID</th>
@@ -431,7 +601,19 @@ const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
                 <td>
                   <input type="text" class="num-input ch-num-input" value="{{.GuideNumber}}" onkeydown="if(event.key==='Enter'){event.preventDefault();}">
                 </td>
-                <td><strong>{{.GuideName}}</strong></td>
+                <td>
+                  <select class="group-select {{if and .UserGroup (ne .UserGroup "None")}}assigned{{end}}" onchange="styleGroupSelect(this);">
+                    <option value="None">None</option>
+                    {{$currGrp := .UserGroup}}
+                    {{range $.UserGroups}}
+                    <option value="{{.}}" {{if eq $currGrp .}}selected{{end}}>{{.}}</option>
+                    {{end}}
+                  </select>
+                </td>
+                <td>
+                  <strong>{{.GuideName}}</strong>
+                  <span class="status-pill health-badge" style="display: none;"></span>
+                </td>
                 <td><span class="group-pill">{{.Group}}</span></td>
                 <td style="color: var(--text-muted); font-size: 0.8rem;">{{if .TvgID}}{{.TvgID}}{{else}}-{{end}}</td>
                 <td><a href="/stream/{{.GuideNumber}}" target="_blank" style="color: var(--accent); text-decoration: none;">Play</a></td>
@@ -444,35 +626,247 @@ const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
           <p style="color: var(--text-muted); font-size: 0.9rem;">No channels loaded. Enter your playlist URLs above and click Save &amp; Reload Feeds.</p>
         {{end}}
       </div>
+
+      <!-- Custom Channel Groups for Jellyfin -->
+      <div class="card" style="border-left: 4px solid var(--accent);">
+        <h2>Would you like to create Channel Groups for Jellyfin?</h2>
+        <p style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.55; margin-bottom: 12px;">
+          <strong>How this works in Jellyfin vs. Plex:</strong> Jellyfin and Emby support M3U playlists with embedded <code>group-title</code> tags (and separate per-group M3U tuner URLs), allowing you to organize channels into custom categories. <strong>Plex DVR does not support channel groups</strong> because Plex only accepts the HDHomeRun tuner standard—which transmits channel numbers and station names without any folder or category fields (in Plex, stations are organized strictly by your <strong>Ch #</strong> order).
+        </p>
+        <div class="form-group">
+          <label>Enter Channel Group Names (Separated by a comma and a space — <code>None</code> is included automatically as the default)</label>
+          <input type="text" name="custom_groups_text" value="{{.Config.CustomGroupsText}}" placeholder="e.g.: Aussie Freeview, News, Sports, Kids, Music">
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <button type="submit" class="btn" onclick="document.getElementById('actionType').value='process_groups'">Process</button>
+          <a href="/m3u-mode" class="btn btn-secondary">View Jellyfin M3U Group Links &amp; Setup &rarr;</a>
+        </div>
+      </div>
     </form>
 
     <form id="importForm" action="/import-config" method="POST" enctype="multipart/form-data" style="display: none;">
       <input type="file" id="importFile" name="config_file" accept=".json" onchange="document.getElementById('importForm').submit()">
     </form>
-
-    <!-- Optional M3U Mode Settings -->
-    <div class="card" style="border-left: 4px solid var(--accent);">
-      <h2>Optional Settings</h2>
-      <p style="color: var(--text); font-size: 0.95rem; font-weight: 500; line-height: 1.5; margin-bottom: 10px;">
-        Would you like your Media Server to display clean category tabs (<strong>Australia</strong>, <strong>United States</strong>, <strong>Canada</strong>, <strong>Japan</strong>) across the top of your Live TV screen instead of one giant mixed list?
-      </p>
-      <p style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.5;">
-        <strong>What this section does:</strong> By default, StreamTuner emulates a hardware HDHomeRun tuner. While HDHomeRun is plug-and-play, the HDHomeRun specification does not support category folders—so every station is placed into a single list. StreamTuner also generates a dedicated <strong>M3U Playlist endpoint</strong> that embeds regional category tags (<code>group-title</code>) alongside your repaired video streams.
-      </p>
-      <ul class="info-list" style="margin: 10px 0 16px 18px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.6;">
-        <li><strong>For Jellyfin / Emby Users:</strong> Instead of adding StreamTuner as an HDHomeRun device, you can add it as an <strong>M3U Tuner</strong> using the links on the next screen. Jellyfin will automatically read the embedded country tags and display filterable category tabs at the top of your Live TV guide.</li>
-        <li><strong>For Plex Users:</strong> Plex DVR only accepts HDHomeRun connections and does not natively support M3U URLs or category tabs. Plex users should remain in standard HDHomeRun mode, where StreamTuner automatically separates countries by channel number blocks (1–99 for Australia, 1000+ for US, 2000+ for Canada, 3000+ for Japan).</li>
-      </ul>
-      <a href="/m3u-mode" class="btn btn-secondary">Open M3U Category Setup &amp; Endpoints &rarr;</a>
-    </div>
   </div>
 `
 const uiTemplateScript = `  <script>
+    let healthAbort = false;
+
+    async function searchYouTubeLive() {
+      const input = document.getElementById('ytSearchInput');
+      const btn = document.getElementById('ytSearchBtn');
+      const container = document.getElementById('ytResultsContainer');
+      const query = input ? input.value.trim() : '';
+      if (!query) return;
+
+      btn.disabled = true;
+      btn.textContent = 'Searching...';
+      container.innerHTML = '<div style="font-size: 0.82rem; color: var(--text-muted);">Searching YouTube for live broadcasts...</div>';
+
+      try {
+        const resp = await fetch('/api/youtube-search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query })
+        });
+        const results = await resp.json();
+        container.innerHTML = '';
+
+        if (!results || results.length === 0) {
+          container.innerHTML = '<div style="font-size: 0.82rem; color: var(--text-muted);">No live broadcasts found for "' + query + '". Try adding the broadcaster name.</div>';
+        } else {
+          results.forEach((item, idx) => {
+            const div = document.createElement('div');
+            div.className = 'yt-item';
+
+            const info = document.createElement('div');
+            info.style.flex = '1';
+            info.style.minWidth = '200px';
+            const badgeText = item.is_permanent ? 'Permanent /live URL' : 'Stream URL';
+            info.innerHTML = '<div style="font-weight: 700; font-size: 0.85rem; color: var(--text);">' + escapeHtml(item.channel || item.title) + '</div>' +
+                             '<div style="font-size: 0.78rem; color: var(--text-muted);">' + escapeHtml(item.title) + ' • <span style="color: var(--accent);">' + badgeText + '</span></div>';
+
+            const controls = document.createElement('div');
+            controls.style.display = 'flex';
+            controls.style.gap = '6px';
+            controls.style.alignItems = 'center';
+
+            const numBox = document.createElement('input');
+            numBox.type = 'text';
+            numBox.className = 'num-input';
+            numBox.value = String(500 + idx);
+            numBox.title = 'Channel Number';
+
+            const addBtn = document.createElement('button');
+            addBtn.type = 'button';
+            addBtn.className = 'btn';
+            addBtn.style.padding = '6px 12px';
+            addBtn.style.fontSize = '0.8rem';
+            addBtn.textContent = '+ Add';
+            addBtn.onclick = function() {
+              addYouTubeChannel(numBox.value.trim() || '500', item.channel || item.title, item.url);
+            };
+
+            controls.appendChild(numBox);
+            controls.appendChild(addBtn);
+            div.appendChild(info);
+            div.appendChild(controls);
+            container.appendChild(div);
+          });
+        }
+      } catch (err) {
+        container.innerHTML = '<div style="font-size: 0.82rem; color: #f87171;">Search error. Please try again.</div>';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Search YouTube Live';
+      }
+    }
+
+    function escapeHtml(str) {
+      return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function addYouTubeChannel(chNum, chName, chUrl) {
+      const box = document.getElementById('customChannelsTextarea');
+      const cleanName = '[YT] ' + chName.replace(/,/g, ' ');
+      const newLine = chNum + ', ' + cleanName + ', ' + chUrl + ', ';
+      const current = box.value.trim();
+      box.value = current ? (current + '\n' + newLine) : newLine;
+
+      document.getElementById('actionType').value = 'reload_feeds';
+      prepareSubmission();
+      document.getElementById('mainForm').submit();
+    }
+
+    async function runHealthCheck() {
+      const allRows = Array.from(document.querySelectorAll('.ch-row'));
+      const activeRows = allRows.filter(r => {
+        const cb = r.querySelector('.ch-cb');
+        return cb && cb.checked;
+      });
+
+      if (activeRows.length === 0) {
+        alert('Please check at least one channel first before running the stream health test.');
+        return;
+      }
+
+      healthAbort = false;
+      const panel = document.getElementById('healthPanel');
+      const titleEl = document.getElementById('healthStatusTitle');
+      const barEl = document.getElementById('healthProgressBar');
+      const summaryEl = document.getElementById('healthSummaryText');
+      const disableBtn = document.getElementById('btnDisableFailed');
+      const stopBtn = document.getElementById('btnStopCheck');
+
+      panel.style.display = 'block';
+      disableBtn.style.display = 'none';
+      stopBtn.style.display = 'inline-block';
+      barEl.style.width = '0%';
+
+      let okCount = 0;
+      let noAudioCount = 0;
+      let deadCount = 0;
+
+      for (let i = 0; i < activeRows.length; i++) {
+        if (healthAbort) break;
+
+        const row = activeRows[i];
+        const chName = row.getAttribute('data-name') || 'Channel';
+        const chUrl = row.getAttribute('data-url') || '';
+        const routeSel = row.querySelector('.route-select');
+        const routeVal = routeSel ? routeSel.value : 'direct';
+        const badge = row.querySelector('.health-badge');
+
+        row.removeAttribute('data-health');
+        if (badge) {
+          badge.style.display = 'inline-block';
+          badge.className = 'status-pill health-badge status-testing';
+          badge.textContent = 'Testing...';
+        }
+
+        titleEl.textContent = 'Testing ' + (i + 1) + ' of ' + activeRows.length + ': ' + chName;
+        barEl.style.width = Math.round(((i) / activeRows.length) * 100) + '%';
+
+        try {
+          const resp = await fetch('/api/check-channel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: chUrl, route: routeVal })
+          });
+          const res = await resp.json();
+
+          row.setAttribute('data-health', res.status);
+          if (badge) {
+            if (res.status === 'ok') {
+              okCount++;
+              badge.className = 'status-pill health-badge status-ok';
+              badge.textContent = '✓ AV OK';
+            } else if (res.status === 'no_audio') {
+              noAudioCount++;
+              badge.className = 'status-pill health-badge status-noaudio';
+              badge.textContent = '⚠ No Audio';
+            } else {
+              deadCount++;
+              badge.className = 'status-pill health-badge status-dead';
+              badge.textContent = '✗ Offline';
+            }
+          }
+        } catch (err) {
+          deadCount++;
+          row.setAttribute('data-health', 'offline');
+          if (badge) {
+            badge.className = 'status-pill health-badge status-dead';
+            badge.textContent = '✗ Error';
+          }
+        }
+
+        const totalBad = noAudioCount + deadCount;
+        summaryEl.textContent = 'Results so far: ' + okCount + ' Working (AV) • ' + noAudioCount + ' No Audio • ' + deadCount + ' Offline';
+        if (totalBad > 0) {
+          disableBtn.style.display = 'inline-block';
+          document.getElementById('failedCountSpan').textContent = totalBad;
+        }
+      }
+
+      barEl.style.width = '100%';
+      stopBtn.style.display = 'none';
+      titleEl.textContent = healthAbort ? 'Stream Health Check Stopped' : '✓ Stream Health Check Complete';
+    }
+
+    function stopHealthCheck() {
+      healthAbort = true;
+    }
+
+    function disableFailedChannels() {
+      const rows = document.querySelectorAll('.ch-row');
+      let disabled = 0;
+      rows.forEach(row => {
+        const h = row.getAttribute('data-health');
+        if (h === 'no_audio' || h === 'offline') {
+          const cb = row.querySelector('.ch-cb');
+          if (cb && cb.checked) {
+            cb.checked = false;
+            disabled++;
+          }
+        }
+      });
+      updateLiveCount();
+      alert('Unchecked ' + disabled + ' broken or silent channels. Click "Apply Changes" to save your cleaned lineup!');
+    }
+
     function styleRouteSelect(sel) {
       if (sel.value && sel.value !== 'direct') {
         sel.classList.add('active');
       } else {
         sel.classList.remove('active');
+      }
+    }
+
+    function styleGroupSelect(sel) {
+      if (sel.value && sel.value !== 'None') {
+        sel.classList.add('assigned');
+      } else {
+        sel.classList.remove('assigned');
       }
     }
 
@@ -510,11 +904,13 @@ const uiTemplateScript = `  <script>
     function filterTable() {
       const searchInput = document.getElementById('channelSearch');
       const regionSelect = document.getElementById('regionFilter');
+      const userGroupSelect = document.getElementById('userGroupFilter');
       const statusSelect = document.getElementById('statusFilter');
       if (!searchInput) return;
 
       const query = searchInput.value.toLowerCase().trim();
       const region = regionSelect ? regionSelect.value : 'ALL';
+      const userGroup = userGroupSelect ? userGroupSelect.value : 'ALL';
       const status = statusSelect ? statusSelect.value : 'ALL';
 
       const rows = document.querySelectorAll('.ch-row');
@@ -530,15 +926,18 @@ const uiTemplateScript = `  <script>
         const isChecked = cb ? cb.checked : false;
         const routeSel = row.querySelector('.route-select');
         const isVPN = routeSel ? (routeSel.value && routeSel.value !== 'direct') : false;
+        const grpSel = row.querySelector('.group-select');
+        const assignedGrp = grpSel ? grpSel.value : 'None';
 
-        const matchesQuery = !query || name.includes(query) || num.includes(query) || group.toLowerCase().includes(query) || epg.includes(query);
+        const matchesQuery = !query || name.includes(query) || num.includes(query) || group.toLowerCase().includes(query) || epg.includes(query) || assignedGrp.toLowerCase().includes(query);
         const matchesRegion = (region === 'ALL') || (group === region);
+        const matchesUserGroup = (userGroup === 'ALL') || (assignedGrp === userGroup);
         let matchesStatus = true;
         if (status === 'ACTIVE') matchesStatus = isChecked;
         else if (status === 'INACTIVE') matchesStatus = !isChecked;
         else if (status === 'VPN') matchesStatus = isVPN;
 
-        if (matchesQuery && matchesRegion && matchesStatus) {
+        if (matchesQuery && matchesRegion && matchesUserGroup && matchesStatus) {
           row.style.display = '';
           visible++;
         } else {
@@ -555,9 +954,11 @@ const uiTemplateScript = `  <script>
     function clearSearchFilters() {
       const searchInput = document.getElementById('channelSearch');
       const regionSelect = document.getElementById('regionFilter');
+      const userGroupSelect = document.getElementById('userGroupFilter');
       const statusSelect = document.getElementById('statusFilter');
       if (searchInput) searchInput.value = '';
       if (regionSelect) regionSelect.value = 'ALL';
+      if (userGroupSelect) userGroupSelect.value = 'ALL';
       if (statusSelect) statusSelect.value = 'ALL';
       filterTable();
     }
@@ -570,13 +971,15 @@ const uiTemplateScript = `  <script>
         const url = row.getAttribute('data-url') || '';
         const cb = row.querySelector('.ch-cb');
         const routeSel = row.querySelector('.route-select');
+        const grpSel = row.querySelector('.group-select');
         const numInput = row.querySelector('.ch-num-input');
         state.push({
           key: key,
           url: url,
           num: numInput ? numInput.value.trim() : '',
           enabled: cb ? cb.checked : false,
-          route: routeSel ? routeSel.value : 'direct'
+          route: routeSel ? routeSel.value : 'direct',
+          user_group: grpSel ? grpSel.value : 'None'
         });
       });
       const hiddenInput = document.getElementById('channelStateJSON');
@@ -611,7 +1014,7 @@ const m3uModeTemplate = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>StreamTuner - Optional M3U Category Setup</title>
+  <title>StreamTuner - Jellyfin Channel Groups &amp; Endpoints</title>
   <script>
     (function() {
       const savedTheme = localStorage.getItem('st_theme') || 'dark';
@@ -645,7 +1048,7 @@ const m3uModeTemplate = `<!DOCTYPE html>
     header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 10px; }
     h1 { font-size: 1.4rem; color: var(--accent); }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 20px; line-height: 1.5; }
-    .url-box { background: var(--input-bg); border: 1px solid var(--border); padding: 12px; border-radius: 8px; font-family: monospace; font-size: 0.9rem; color: var(--accent); word-break: break-all; margin: 8px 0 16px 0; }
+    .url-box { background: var(--input-bg); border: 1px solid var(--border); padding: 12px; border-radius: 8px; font-family: monospace; font-size: 0.9rem; color: var(--accent); word-break: break-all; margin: 6px 0 14px 0; }
     .btn { background: var(--accent); color: var(--btn-text); border: none; padding: 10px 18px; font-size: 0.9rem; font-weight: 700; border-radius: 8px; text-decoration: none; display: inline-block; }
     .step { margin-bottom: 16px; font-size: 0.9rem; }
     .step strong { color: var(--accent); }
@@ -654,14 +1057,17 @@ const m3uModeTemplate = `<!DOCTYPE html>
 <body>
   <div class="container">
     <header>
-      <h1>M3U Category Mode &amp; Endpoints</h1>
+      <h1>Jellyfin Channel Groups &amp; Endpoints</h1>
       <a href="/" class="btn" style="padding: 6px 12px; font-size: 0.8rem;">&larr; Back to Dashboard</a>
     </header>
 
     <div class="card">
-      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">StreamTuner Direct Endpoints</h2>
+      <h2 style="font-size: 1.2rem; margin-bottom: 10px;">Dynamic StreamTuner Endpoints</h2>
+      <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 14px;">
+        All links below dynamically reflect your server address and active stations.
+      </p>
 
-      <div style="font-size: 0.85rem; color: var(--text-muted);">M3U Playlist URL (Includes Category Group Tags for Jellyfin/Emby):</div>
+      <div style="font-size: 0.85rem; color: var(--text-muted);">Unified M3U Playlist URL (Includes your custom <code>group-title</code> tags):</div>
       <div class="url-box">{{.BaseURL}}/channels.m3u</div>
 
       <div style="font-size: 0.85rem; color: var(--text-muted);">Aggregated XMLTV EPG URL (Filtered to Active Stations Only):</div>
@@ -671,35 +1077,41 @@ const m3uModeTemplate = `<!DOCTYPE html>
       <div class="url-box">{{.BaseURL}}/lineup.json</div>
     </div>
 
+    {{if .UserGroups}}
     <div class="card">
-      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">How to Enable Category Tabs in Jellyfin</h2>
+      <h2 style="font-size: 1.2rem; margin-bottom: 10px;">Your Custom Jellyfin Group Links</h2>
+      <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 14px;">
+        Add any of these individual group URLs as separate M3U Tuners in Jellyfin, or use the Unified M3U Playlist URL above:
+      </p>
+      {{range .UserGroups}}
+      <div style="font-size: 0.85rem; color: var(--text); font-weight: 600;">{{.}}:</div>
+      <div class="url-box">{{$.BaseURL}}/channels.m3u?group={{urlquery .}}</div>
+      {{end}}
+    </div>
+    {{end}}
+
+    <div class="card">
+      <h2 style="font-size: 1.2rem; margin-bottom: 14px;">How to Connect Groups in Jellyfin</h2>
       <div class="step">
-        <strong>1. Remove Existing HDHomeRun Tuner:</strong> In Jellyfin, go to <em>Dashboard &gt; Live TV</em>. Under <em>Tuner Devices</em>, delete the existing StreamTuner HDHomeRun entry.
+        <strong>1. Open Live TV Settings:</strong> In Jellyfin, go to <em>Dashboard &gt; Live TV</em>.
       </div>
       <div class="step">
-        <strong>2. Add as M3U Tuner:</strong> Click <strong>+</strong> next to Tuner Devices and select <strong>M3U Tuner</strong>.
+        <strong>2. Add M3U Tuner:</strong> Click <strong>+</strong> next to <em>Tuner Devices</em> and select <strong>M3U Tuner</strong>. Paste either the Unified M3U link or one of your Custom Group links above.
       </div>
       <div class="step">
-        <strong>3. Paste Playlist Link:</strong> In the <em>File or URL</em> box, paste:
-        <div style="font-family: monospace; color: var(--accent); margin-top: 4px;">{{.BaseURL}}/channels.m3u</div>
+        <strong>3. Set Simultaneous Stream Limit:</strong> Set the limit to match your Virtual Tuners count.
       </div>
       <div class="step">
-        <strong>4. Set Simultaneous Stream Limit:</strong> Set the limit to match your Virtual Tuners count.
-      </div>
-      <div class="step">
-        <strong>5. Connect Guide:</strong> Under <em>TV Guide Data Providers</em>, ensure your XMLTV provider points to:
-        <div style="font-family: monospace; color: var(--accent); margin-top: 4px;">{{.BaseURL}}/epg.xml</div>
-      </div>
-      <div class="step">
-        <strong>6. Done!</strong> Open Live TV in Jellyfin and use the category filter at the top of the guide to switch between countries.
+        <strong>4. Connect Guide:</strong> Under <em>TV Guide Data Providers</em>, point your XMLTV provider to <code>{{.BaseURL}}/epg.xml</code>.
       </div>
     </div>
   </div>
 </body>
 </html>`
+
 var uiTemplate = uiTemplateHead + uiTemplateTable + uiTemplateScript
-func getPlaylistMeta(url string, index int) (tag string, group string, baseOffset int) {
-	u := strings.ToLower(url)
+func getPlaylistMeta(rawURL string, index int) (tag string, group string, baseOffset int) {
+	u := strings.ToLower(rawURL)
 	if strings.Contains(u, "/au/") || strings.Contains(u, "australia") || strings.Contains(u, "raw-tv") {
 		return "[AU]", "Australia", 1
 	} else if strings.Contains(u, "/us.m3u") || strings.Contains(u, "/us/") || strings.Contains(u, "countries/us") {
@@ -714,9 +1126,9 @@ func getPlaylistMeta(url string, index int) (tag string, group string, baseOffse
 	return fmt.Sprintf("[P%d]", index+1), fmt.Sprintf("Playlist %d", index+1), (index+5)*1000
 }
 
-func fetchAndParseM3U(url string, tag string, group string, baseOffset int) ([]Channel, error) {
+func fetchAndParseM3U(rawURL string, tag string, group string, baseOffset int) ([]Channel, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -788,6 +1200,7 @@ func fetchAndParseM3U(url string, tag string, group string, baseOffset int) ([]C
 				Logo:        currentLogo,
 				TvgID:       currentTvgID,
 				Group:       currentGroup,
+				UserGroup:   "None",
 				Enabled:     true,
 				Route:       "direct",
 			})
@@ -946,6 +1359,71 @@ func loadAllChannels() {
 	applySavedChannelState(combined)
 	sortChannels(combined)
 	channels = combined
+}
+
+func probeChannelStream(rawURL string, proxyURL string) StreamCheckResponse {
+	resolvedURL, err := resolveStreamURL(rawURL, proxyURL)
+	if err != nil {
+		return StreamCheckResponse{Status: "offline", Detail: "YouTube or URL resolve failed"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	args := []string{
+		"-v", "error",
+		"-rw_timeout", "8000000",
+		"-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+	}
+	if proxyURL != "" && (strings.HasPrefix(proxyURL, "http://") || strings.HasPrefix(proxyURL, "https://")) {
+		args = append(args, "-http_proxy", proxyURL)
+	}
+	args = append(args, "-show_entries", "stream=codec_type", "-of", "json", resolvedURL)
+
+	cmd := exec.CommandContext(ctx, "ffprobe", args...)
+	if proxyURL != "" {
+		cmd.Env = append(os.Environ(),
+			"all_proxy="+proxyURL,
+			"ALL_PROXY="+proxyURL,
+			"http_proxy="+proxyURL,
+			"HTTP_PROXY="+proxyURL,
+			"https_proxy="+proxyURL,
+			"HTTPS_PROXY="+proxyURL,
+		)
+	}
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return StreamCheckResponse{Status: "offline", Detail: "Stream unreachable or geoblocked"}
+	}
+
+	var parsed struct {
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		return StreamCheckResponse{Status: "offline", Detail: "Invalid stream metadata"}
+	}
+
+	hasVideo := false
+	hasAudio := false
+	for _, s := range parsed.Streams {
+		if s.CodecType == "video" {
+			hasVideo = true
+		} else if s.CodecType == "audio" {
+			hasAudio = true
+		}
+	}
+
+	if !hasVideo {
+		return StreamCheckResponse{Status: "offline", HasVideo: false, HasAudio: hasAudio, Detail: "No video stream found"}
+	}
+	if !hasAudio {
+		return StreamCheckResponse{Status: "no_audio", HasVideo: true, HasAudio: false, Detail: "Video working, no audio track"}
+	}
+	return StreamCheckResponse{Status: "ok", HasVideo: true, HasAudio: true, Detail: "Video & Audio OK"}
 }
 
 func refreshEPG() {
@@ -1232,14 +1710,52 @@ func main() {
 		tmpl.Execute(w, data)
 	})
 
+	// Audio/Video Health Check Endpoint
+	http.HandleFunc("/api/check-channel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req StreamCheckRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+		proxyURL := getProxyURLForRoute(req.Route)
+		result := probeChannelStream(req.URL, proxyURL)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	})
+
 	// M3U Mode Setup Screen
 	http.HandleFunc("/m3u-mode", func(w http.ResponseWriter, r *http.Request) {
 		tmpl, _ := template.New("m3u").Parse(m3uModeTemplate)
 		baseURL := getBaseURL(r)
+
+		groupMap := make(map[string]bool)
+		configLock.RLock()
+		for _, c := range channels {
+			if c.Enabled && c.Group != "" {
+				groupMap[c.Group] = true
+			}
+		}
+		configLock.RUnlock()
+
+		var groups []string
+		for g := range groupMap {
+			groups = append(groups, g)
+		}
+		sort.Strings(groups)
+		if len(groups) == 0 {
+			groups = []string{"Australia", "United States", "Canada", "Japan"}
+		}
+
 		data := struct {
 			BaseURL string
+			Groups  []string
 		}{
 			BaseURL: baseURL,
+			Groups:  groups,
 		}
 		tmpl.Execute(w, data)
 	})
@@ -1414,11 +1930,12 @@ func main() {
 		http.Redirect(w, r, "/?saved=1", http.StatusSeeOther)
 	})
 
-	// M3U Playlist Endpoint
+	// M3U Playlist Endpoint (Supports optional ?group=Filter)
 	http.HandleFunc("/channels.m3u", func(w http.ResponseWriter, r *http.Request) {
 		configLock.RLock()
 		defer configLock.RUnlock()
 
+		filterGroup := strings.TrimSpace(r.URL.Query().Get("group"))
 		baseURL := getBaseURL(r)
 		w.Header().Set("Content-Type", "application/x-mpegURL; charset=utf-8")
 		w.Header().Set("Content-Disposition", "inline; filename=\"channels.m3u\"")
@@ -1426,6 +1943,9 @@ func main() {
 		fmt.Fprintln(w, "#EXTM3U")
 		for _, c := range channels {
 			if c.Enabled {
+				if filterGroup != "" && !strings.EqualFold(c.Group, filterGroup) {
+					continue
+				}
 				chID := c.TvgID
 				if chID == "" {
 					chID = c.GuideNumber
@@ -1504,7 +2024,7 @@ func main() {
 		json.NewEncoder(w).Encode(lineup)
 	})
 
-	// Multi-VPN Live Stream Proxy
+	// Multi-VPN & YouTube Live Stream Proxy
 	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
 		chNum := strings.TrimPrefix(r.URL.Path, "/stream/")
 		var targetURL string
@@ -1520,16 +2040,6 @@ func main() {
 				break
 			}
 		}
-
-		var matchedProfile *VPNProfile
-		if routeID != "" && routeID != "direct" {
-			for _, p := range appConfig.VPNProfiles {
-				if p.ID == routeID {
-					matchedProfile = &p
-					break
-				}
-			}
-		}
 		configLock.RUnlock()
 
 		if targetURL == "" {
@@ -1537,24 +2047,18 @@ func main() {
 			return
 		}
 
-		var proxyURL string
-		if matchedProfile != nil && matchedProfile.Host != "" && matchedProfile.Port != "" {
-			auth := ""
-			if matchedProfile.Username != "" {
-				if matchedProfile.Password != "" {
-					auth = url.QueryEscape(matchedProfile.Username) + ":" + url.QueryEscape(matchedProfile.Password) + "@"
-				} else {
-					auth = url.QueryEscape(matchedProfile.Username) + "@"
-				}
-			}
-			proto := matchedProfile.Type
-			if proto == "" {
-				proto = "socks5"
-			}
-			proxyURL = fmt.Sprintf("%s://%s%s:%s", proto, auth, matchedProfile.Host, matchedProfile.Port)
-			log.Printf("Streaming channel %s via VPN Profile '%s' (%s)", chNum, matchedProfile.Name, proxyURL)
+		proxyURL := getProxyURLForRoute(routeID)
+		resolvedURL, err := resolveStreamURL(targetURL, proxyURL)
+		if err != nil {
+			log.Printf("Failed to resolve stream URL for channel %s: %v", chNum, err)
+			http.Error(w, "Failed to resolve stream URL", http.StatusBadGateway)
+			return
+		}
+
+		if proxyURL != "" {
+			log.Printf("Streaming channel %s via VPN Route '%s'", chNum, routeID)
 		} else {
-			log.Printf("Streaming channel %s directly (Direct Connection)", chNum)
+			log.Printf("Streaming channel %s directly", chNum)
 		}
 
 		ctx, cancel := context.WithCancel(r.Context())
@@ -1573,7 +2077,7 @@ func main() {
 		}
 
 		ffmpegArgs = append(ffmpegArgs,
-			"-i", targetURL,
+			"-i", resolvedURL,
 			"-c", "copy",
 			"-f", "mpegts",
 			"-flush_packets", "1",
