@@ -1,3 +1,4 @@
+// === PART 1 OF 9 ===
 package main
 
 import (
@@ -134,7 +135,7 @@ var (
 	isRefreshingEPG bool
 	epgLock         sync.Mutex
 )
-
+// === PART 2 OF 9 ===
 func makeChannelKey(name, streamURL string) string {
 	return strings.TrimSpace(name) + "|" + strings.TrimSpace(streamURL)
 }
@@ -256,7 +257,8 @@ func resolveStreamURL(rawURL string, proxyURL string) (string, error) {
 	}
 	return "", fmt.Errorf("no playable stream URL returned by yt-dlp")
 }
-const uiTemplateHead = `<!DOCTYPE html>
+// === PART 3 OF 9 ===
+const uiTemplatePart1 = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
@@ -385,7 +387,9 @@ const uiTemplateHead = `<!DOCTYPE html>
 </head>
 <body>
   <div class="container">
-    <header>
+`
+// === PART 4 OF 9 ===
+const uiTemplatePart2 = `    <header>
       <div class="header-top">
         <div class="logo-group">
           <h1>StreamTuner</h1>
@@ -434,7 +438,6 @@ const uiTemplateHead = `<!DOCTYPE html>
       <input type="hidden" name="action_type" id="actionType" value="apply_channels">
       <input type="hidden" name="channel_state_json" id="channelStateJSON" value="">
 
-      <!-- Sources & General Config -->
       <div class="card">
         <h2>Configuration &amp; Sources</h2>
         <div class="form-group">
@@ -446,7 +449,6 @@ const uiTemplateHead = `<!DOCTYPE html>
           <textarea name="m3u_urls" placeholder="https://example.com/au.m3u8&#10;https://example.com/us.m3u">{{.Config.M3UURLs}}</textarea>
         </div>
 
-        <!-- YouTube Live Channel Search -->
         <div class="yt-box">
           <label style="color: var(--accent); font-weight: 700; margin-bottom: 6px;">📺 Search &amp; Add YouTube Live Channels</label>
           <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px;">
@@ -485,7 +487,6 @@ const uiTemplateHead = `<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Multi-VPN Profiles Gateway -->
       <div class="card" style="border-left: 4px solid var(--purple);">
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
           <h2>VPN &amp; Proxy Gateway (Multi-Country Profiles)</h2>
@@ -510,8 +511,8 @@ const uiTemplateHead = `<!DOCTYPE html>
         </div>
       </div>
 `
-const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
-      <div class="card">
+// === PART 5 OF 9 ===
+const uiTemplatePart3 = `      <div class="card">
         <div class="table-actions">
           <h2>Live TV Channels ({{len .Channels}})</h2>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
@@ -522,7 +523,6 @@ const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
           </div>
         </div>
 
-        <!-- Stream Health Progress Panel -->
         <div class="health-panel" id="healthPanel">
           <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
             <strong id="healthStatusTitle" style="font-size: 0.9rem; color: var(--accent);">Checking streams...</strong>
@@ -627,7 +627,6 @@ const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
         {{end}}
       </div>
 
-      <!-- Custom Channel Groups for Jellyfin -->
       <div class="card" style="border-left: 4px solid var(--accent);">
         <h2>Would you like to create Channel Groups for Jellyfin?</h2>
         <p style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.55; margin-bottom: 12px;">
@@ -649,7 +648,8 @@ const uiTemplateTable = `      <!-- Live TV Channels Lineup -->
     </form>
   </div>
 `
-const uiTemplateScript = `  <script>
+// === PART 6 OF 9 ===
+const uiTemplatePart4 = `  <script>
     let healthAbort = false;
 
     async function searchYouTubeLive() {
@@ -1009,6 +1009,8 @@ const uiTemplateScript = `  <script>
 </body>
 </html>`
 
+var uiTemplate = uiTemplatePart1 + uiTemplatePart2 + uiTemplatePart3 + uiTemplatePart4
+
 const m3uModeTemplate = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -1108,8 +1110,7 @@ const m3uModeTemplate = `<!DOCTYPE html>
   </div>
 </body>
 </html>`
-
-var uiTemplate = uiTemplateHead + uiTemplateTable + uiTemplateScript
+// === PART 7 OF 9 ===
 func getPlaylistMeta(rawURL string, index int) (tag string, group string, baseOffset int) {
 	u := strings.ToLower(rawURL)
 	if strings.Contains(u, "/au/") || strings.Contains(u, "australia") || strings.Contains(u, "raw-tv") {
@@ -1239,8 +1240,16 @@ func parseCustomChannels(text string) []Channel {
 			if len(parts) >= 4 {
 				tvgID = strings.TrimSpace(parts[3])
 			}
+			groupLabel := "Australia"
+			if isYouTubeURL(streamURL) {
+				groupLabel = "YouTube Live"
+			}
 			if !strings.HasPrefix(name, "[") {
-				name = "[AU] " + name
+				if isYouTubeURL(streamURL) {
+					name = "[YT] " + name
+				} else {
+					name = "[AU] " + name
+				}
 			}
 			list = append(list, Channel{
 				Key:         makeChannelKey(name, streamURL),
@@ -1248,7 +1257,8 @@ func parseCustomChannels(text string) []Channel {
 				GuideName:   name,
 				URL:         streamURL,
 				TvgID:       tvgID,
-				Group:       "Australia",
+				Group:       groupLabel,
+				UserGroup:   "None",
 				Enabled:     true,
 				Route:       "direct",
 			})
@@ -1318,6 +1328,15 @@ func applySavedChannelState(list []Channel) {
 				list[i].Route = r
 			}
 		}
+
+		list[i].UserGroup = "None"
+		if appConfig.ChannelGroups != nil {
+			if g, ok := appConfig.ChannelGroups[k]; ok && g != "" {
+				list[i].UserGroup = g
+			} else if g, ok := appConfig.ChannelGroups[u]; ok && g != "" {
+				list[i].UserGroup = g
+			}
+		}
 	}
 }
 
@@ -1359,6 +1378,85 @@ func loadAllChannels() {
 	applySavedChannelState(combined)
 	sortChannels(combined)
 	channels = combined
+}
+// === PART 8 OF 9 ===
+func searchYouTubeStreams(query string) []YouTubeSearchResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	searchTerm := "ytsearch8:" + strings.TrimSpace(query) + " live"
+	cmd := exec.CommandContext(ctx, "yt-dlp",
+		"--dump-json",
+		"--flat-playlist",
+		"--no-warnings",
+		"--skip-download",
+		searchTerm,
+	)
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		log.Printf("YouTube search error: %v", err)
+		return []YouTubeSearchResult{}
+	}
+
+	var results []YouTubeSearchResult
+	seen := make(map[string]bool)
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var item struct {
+			ID         string `json:"id"`
+			Title      string `json:"title"`
+			Channel    string `json:"channel"`
+			Uploader   string `json:"uploader"`
+			ChannelURL string `json:"channel_url"`
+			URL        string `json:"url"`
+			WebpageURL string `json:"webpage_url"`
+			LiveStatus string `json:"live_status"`
+		}
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			continue
+		}
+
+		chName := item.Channel
+		if chName == "" {
+			chName = item.Uploader
+		}
+		if chName == "" {
+			chName = item.Title
+		}
+
+		targetURL := ""
+		isPerm := false
+		if item.ChannelURL != "" {
+			targetURL = strings.TrimRight(item.ChannelURL, "/") + "/live"
+			isPerm = true
+		} else if item.WebpageURL != "" {
+			targetURL = item.WebpageURL
+		} else if item.URL != "" {
+			targetURL = item.URL
+		} else if item.ID != "" {
+			targetURL = "https://www.youtube.com/watch?v=" + item.ID
+		}
+
+		if targetURL == "" || seen[targetURL] {
+			continue
+		}
+		seen[targetURL] = true
+
+		results = append(results, YouTubeSearchResult{
+			Title:       item.Title,
+			Channel:     chName,
+			URL:         targetURL,
+			IsPermanent: isPerm,
+		})
+	}
+	return results
 }
 
 func probeChannelStream(rawURL string, proxyURL string) StreamCheckResponse {
@@ -1580,6 +1678,7 @@ func refreshEPG() {
 	os.Rename(tmpFile, epgPath)
 	log.Printf("EPG aggregation complete: saved to %s", epgPath)
 }
+// === PART 9 OF 9 ===
 func loadConfig() {
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
@@ -1602,6 +1701,9 @@ func loadConfig() {
 		VPNProfilesText:  "",
 		VPNProfiles:      []VPNProfile{},
 		ChannelRoutes:    make(map[string]string),
+		CustomGroupsText: "",
+		CustomGroups:     []string{},
+		ChannelGroups:    make(map[string]string),
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -1627,8 +1729,14 @@ func loadConfig() {
 	if appConfig.ChannelRoutes == nil {
 		appConfig.ChannelRoutes = make(map[string]string)
 	}
+	if appConfig.ChannelGroups == nil {
+		appConfig.ChannelGroups = make(map[string]string)
+	}
 	if appConfig.VPNProfilesText != "" {
 		appConfig.VPNProfiles = parseVPNProfiles(appConfig.VPNProfilesText)
+	}
+	if appConfig.CustomGroupsText != "" {
+		appConfig.CustomGroups = parseCustomGroups(appConfig.CustomGroupsText)
 	}
 
 	loadAllChannels()
@@ -1694,6 +1802,7 @@ func main() {
 			Config      Config
 			Channels    []Channel
 			Profiles    []VPNProfile
+			UserGroups  []string
 			ActiveCount int
 			VPNCount    int
 			Saved       bool
@@ -1702,12 +1811,29 @@ func main() {
 			Config:      appConfig,
 			Channels:    channels,
 			Profiles:    appConfig.VPNProfiles,
+			UserGroups:  appConfig.CustomGroups,
 			ActiveCount: active,
 			VPNCount:    vpnActive,
 			Saved:       r.URL.Query().Get("saved") == "1",
 		}
 		configLock.RUnlock()
 		tmpl.Execute(w, data)
+	})
+
+	// YouTube Live Search Endpoint
+	http.HandleFunc("/api/youtube-search", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req YouTubeSearchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Query) == "" {
+			http.Error(w, "Invalid query", http.StatusBadRequest)
+			return
+		}
+		results := searchYouTubeStreams(req.Query)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
 	})
 
 	// Audio/Video Health Check Endpoint
@@ -1732,30 +1858,16 @@ func main() {
 		tmpl, _ := template.New("m3u").Parse(m3uModeTemplate)
 		baseURL := getBaseURL(r)
 
-		groupMap := make(map[string]bool)
 		configLock.RLock()
-		for _, c := range channels {
-			if c.Enabled && c.Group != "" {
-				groupMap[c.Group] = true
-			}
-		}
+		userGroups := append([]string{}, appConfig.CustomGroups...)
 		configLock.RUnlock()
 
-		var groups []string
-		for g := range groupMap {
-			groups = append(groups, g)
-		}
-		sort.Strings(groups)
-		if len(groups) == 0 {
-			groups = []string{"Australia", "United States", "Canada", "Japan"}
-		}
-
 		data := struct {
-			BaseURL string
-			Groups  []string
+			BaseURL    string
+			UserGroups []string
 		}{
-			BaseURL: baseURL,
-			Groups:  groups,
+			BaseURL:    baseURL,
+			UserGroups: userGroups,
 		}
 		tmpl.Execute(w, data)
 	})
@@ -1799,6 +1911,9 @@ func main() {
 				if appConfig.VPNProfilesText != "" {
 					appConfig.VPNProfiles = parseVPNProfiles(appConfig.VPNProfilesText)
 				}
+				if appConfig.CustomGroupsText != "" {
+					appConfig.CustomGroups = parseCustomGroups(appConfig.CustomGroupsText)
+				}
 				loadAllChannels()
 				cfgCopy := appConfig
 				configLock.Unlock()
@@ -1833,6 +1948,7 @@ func main() {
 		newEnabled := make(map[string]bool)
 		newDisabled := make(map[string]bool)
 		newRoutes := make(map[string]string)
+		newGroups := make(map[string]string)
 		newCustomNumbers := make(map[string]string)
 
 		if appConfig.CustomNumbers != nil {
@@ -1869,12 +1985,21 @@ func main() {
 						newRoutes[u.URL] = u.Route
 					}
 				}
+				if u.UserGroup != "" {
+					newGroups[u.Key] = u.UserGroup
+					if u.URL != "" {
+						newGroups[u.URL] = u.UserGroup
+					}
+				}
 			}
 
 			for i := range channels {
 				if u, ok := updateMap[channels[i].Key]; ok {
 					channels[i].Enabled = u.Enabled
 					channels[i].Route = u.Route
+					if u.UserGroup != "" {
+						channels[i].UserGroup = u.UserGroup
+					}
 					if u.Num != "" {
 						channels[i].GuideNumber = u.Num
 					}
@@ -1891,6 +2016,8 @@ func main() {
 				}
 				newRoutes[c.Key] = c.Route
 				newRoutes[c.URL] = c.Route
+				newGroups[c.Key] = c.UserGroup
+				newGroups[c.URL] = c.UserGroup
 			}
 		}
 
@@ -1898,7 +2025,8 @@ func main() {
 		newCustom := strings.TrimSpace(r.FormValue("custom_channels"))
 		newFilter := strings.TrimSpace(r.FormValue("filter_keywords"))
 		newVPNText := strings.TrimSpace(r.FormValue("vpn_profiles_text"))
-		sourcesChanged := (newM3U != appConfig.M3UURLs) || (newCustom != appConfig.CustomChannels) || (newFilter != appConfig.FilterKeywords) || (newVPNText != appConfig.VPNProfilesText)
+		newGroupsText := strings.TrimSpace(r.FormValue("custom_groups_text"))
+		sourcesChanged := (newM3U != appConfig.M3UURLs) || (newCustom != appConfig.CustomChannels) || (newFilter != appConfig.FilterKeywords)
 
 		appConfig.FriendlyName = "StreamTuner"
 		appConfig.TunerCount = tCount
@@ -1912,6 +2040,9 @@ func main() {
 		appConfig.VPNProfilesText = newVPNText
 		appConfig.VPNProfiles = parseVPNProfiles(newVPNText)
 		appConfig.ChannelRoutes = newRoutes
+		appConfig.CustomGroupsText = newGroupsText
+		appConfig.CustomGroups = parseCustomGroups(newGroupsText)
+		appConfig.ChannelGroups = newGroups
 
 		if actionType == "reload_feeds" || sourcesChanged || len(channels) == 0 {
 			loadAllChannels()
@@ -1943,7 +2074,11 @@ func main() {
 		fmt.Fprintln(w, "#EXTM3U")
 		for _, c := range channels {
 			if c.Enabled {
-				if filterGroup != "" && !strings.EqualFold(c.Group, filterGroup) {
+				effectiveGroup := c.Group
+				if c.UserGroup != "" && !strings.EqualFold(c.UserGroup, "None") {
+					effectiveGroup = c.UserGroup
+				}
+				if filterGroup != "" && !strings.EqualFold(effectiveGroup, filterGroup) && !strings.EqualFold(c.Group, filterGroup) {
 					continue
 				}
 				chID := c.TvgID
@@ -1951,7 +2086,7 @@ func main() {
 					chID = c.GuideNumber
 				}
 				fmt.Fprintf(w, "#EXTINF:-1 tvg-id=\"%s\" tvg-name=\"%s\" tvg-chno=\"%s\" tvg-logo=\"%s\" group-title=\"%s\",%s\n",
-					chID, c.GuideName, c.GuideNumber, c.Logo, c.Group, c.GuideName)
+					chID, c.GuideName, c.GuideNumber, c.Logo, effectiveGroup, c.GuideName)
 				fmt.Fprintf(w, "%s/stream/%s\n", baseURL, c.GuideNumber)
 			}
 		}
