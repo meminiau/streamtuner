@@ -2199,11 +2199,12 @@ func main() {
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
-		ffmpegArgs := []string{
+				ffmpegArgs := []string{
 			"-hide_banner",
 			"-loglevel", "warning",
-			"-probesize", "1000000",
-			"-analyzeduration", "1000000",
+			"-fflags", "+genpts+discardcorrupt",
+			"-probesize", "3000000",
+			"-analyzeduration", "3000000",
 			"-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
 		}
 
@@ -2213,7 +2214,14 @@ func main() {
 
 		ffmpegArgs = append(ffmpegArgs,
 			"-i", resolvedURL,
-			"-c", "copy",
+			"-map", "0:v:0",
+			"-map", "0:a:0?",
+			"-c:v", "copy",
+			"-c:a", "aac",
+			"-ac", "2",
+			"-ar", "48000",
+			"-b:a", "192k",
+			"-af", "aresample=async=1000:first_pts=0",
 			"-f", "mpegts",
 			"-flush_packets", "1",
 			"pipe:1",
